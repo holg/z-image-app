@@ -1,0 +1,80 @@
+[package]
+name = "z-image-app"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "z_image_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+z-image = { path = "../z-image-burn/z-image" }
+qwen3-burn = { path = "../qwen3-burn" }
+burn = { path = "../burn/crates/burn", features = ["store"] }
+half = "2.4"
+libc = "0.2"
+
+# egui dependencies (optional, for cross-platform GUI)
+eframe = { version = "0.30", optional = true, default-features = false, features = ["default_fonts", "glow", "persistence"] }
+egui_extras = { version = "0.30", optional = true, features = ["image"] }
+image = { version = "0.25", optional = true }
+rfd = { version = "0.15", optional = true }
+reqwest = { version = "0.12", optional = true, features = ["blocking"] }
+directories = { version = "5.0", optional = true }
+chrono = { version = "0.4", optional = true }
+serde_json = { version = "1.0", optional = true }
+open = { version = "5.0", optional = true }
+rand = { version = "0.9", optional = true }
+
+[features]
+default = ["metal"]
+egui = ["dep:eframe", "dep:egui_extras", "dep:image", "dep:rfd", "dep:reqwest", "dep:directories", "dep:chrono", "dep:serde_json", "dep:open", "dep:rand"]
+
+# Backend features - choose ONE when building
+# macOS (Metal via Candle): cargo build --release --features metal
+# macOS (Metal via WGPU):   cargo build --release --features wgpu-metal
+# Windows/Linux NVIDIA:     cargo build --release --features cuda
+# Windows/Linux (Vulkan):   cargo build --release --features vulkan
+# CPU only:                 cargo build --release --features cpu
+metal = ["burn/candle", "burn/candle-metal"]
+wgpu-metal = ["burn/wgpu", "burn/metal"]
+cuda = ["burn/candle", "burn/candle-cuda"]
+vulkan = ["burn/wgpu", "burn/vulkan"]
+wgpu = ["burn/wgpu"]
+cpu = ["burn/ndarray"]
+
+[build-dependencies]
+cbindgen = "0.27"
+
+[[bin]]
+name = "test_generate"
+path = "src/bin/test_generate.rs"
+
+[[bin]]
+name = "test_tokenizer"
+path = "src/bin/test_tokenizer.rs"
+
+[[bin]]
+name = "test_embedding"
+path = "src/bin/test_embedding.rs"
+
+[[bin]]
+name = "debug_layer"
+path = "src/bin/debug_layer.rs"
+
+[[bin]]
+name = "debug_attn"
+path = "src/bin/debug_attn.rs"
+
+[[bin]]
+name = "test_chat"
+path = "src/bin/test_chat.rs"
+
+[[bin]]
+name = "z-image-gui"
+path = "src/bin/gui.rs"
+required-features = ["egui"]
+
+[[bin]]
+name = "convert_models"
+path = "src/bin/convert_models.rs"

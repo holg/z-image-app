@@ -1,0 +1,33 @@
+# Build artifacts
+/target/
+/build/
+
+# Temporary files
+/tmp/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Xcode build artifacts
+ZImageApp/build/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+DerivedData/
+
+# Model files (too large for git)
+*.safetensors
+*.bpk
+*.bin
+*.gguf
+
+# Logs
+*.log
+
+# Python venv
+.venv/
