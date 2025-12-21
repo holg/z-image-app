@@ -2,6 +2,35 @@
 
 Cross-platform image generation and text chat application using the Burn deep learning framework.
 
+## Required Repositories
+
+This project uses relative path dependencies. Clone these repositories as siblings:
+
+```
+parent-directory/
+├── burn/              # Burn framework (forked)
+├── z-image-burn/      # Z-Image model implementation
+├── qwen3-burn/        # Qwen3 model implementation
+└── z-image-app/       # This repository
+```
+
+### Clone Commands
+
+```bash
+# Create parent directory
+mkdir z-image-project && cd z-image-project
+
+# Clone required repositories
+git clone https://github.com/holg/burn.git
+git clone https://github.com/holg/z-image-burn.git
+git clone https://github.com/holg/qwen3-burn.git
+git clone https://github.com/holg/z-image-app.git
+
+# Build
+cd z-image-app
+cargo build --release --features "egui,metal"  # macOS
+```
+
 ## Quick Start - egui GUI
 
 ### macOS (Metal GPU)
