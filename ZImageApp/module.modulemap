@@ -1,5 +1,0 @@
-module ZImageFFI {
-    header "../z_image_ffi.h"
-    link "z_image_app"
-    export *
-}

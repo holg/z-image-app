@@ -199,6 +199,12 @@ struct ZImageApp {
     attention_slice_size: i32,
     low_memory_mode: bool,
 
+    // Advanced scheduler settings
+    scheduler_shift: f32,
+    use_dynamic_shifting: bool,
+    base_shift: f32,
+    max_shift: f32,
+
     // History
     history: Vec<HistoryItem>,
     selected_history_index: Option<usize>,
@@ -286,6 +292,12 @@ impl ZImageApp {
             // Memory settings
             attention_slice_size: 0,
             low_memory_mode: false,
+
+            // Advanced scheduler settings
+            scheduler_shift: 3.0,
+            use_dynamic_shifting: false,
+            base_shift: 0.5,
+            max_shift: 1.15,
 
             // History
             history: Vec::new(),
@@ -669,12 +681,26 @@ impl ZImageApp {
     }
 
     fn unload_image_models(&mut self) {
-        *self.image_tokenizer.lock().unwrap() = None;
+        self.log("Unloading image models...");
+
+        // Drop models in order (text encoder is largest)
+        self.log("  Dropping text encoder...");
         *self.image_text_encoder.lock().unwrap() = None;
+
+        self.log("  Dropping transformer...");
         *self.image_transformer.lock().unwrap() = None;
+
+        self.log("  Dropping autoencoder...");
         *self.image_autoencoder.lock().unwrap() = None;
+
+        self.log("  Dropping tokenizer...");
+        *self.image_tokenizer.lock().unwrap() = None;
+
         self.image_models_loaded = false;
-        self.log("Image models unloaded");
+
+        // Note: GPU memory may not be immediately released by Metal/Candle
+        // The memory will be reclaimed when needed or on next allocation
+        self.log("Image models unloaded. Note: GPU memory release may be delayed by Metal.");
     }
 
     fn generate_image(&mut self) {
@@ -699,7 +725,12 @@ impl ZImageApp {
             width, height, steps
         ));
 
+        // Apply memory optimization settings
         z_image::set_attention_slice_size(self.attention_slice_size as usize);
+        self.log(&format!(
+            "Memory settings: attention_slice_size={}, low_memory_mode={}",
+            self.attention_slice_size, self.low_memory_mode
+        ));
 
         let tx = self.tx.clone();
         let device = self.device.clone().unwrap();
@@ -964,6 +995,7 @@ impl eframe::App for ZImageApp {
 
 impl ZImageApp {
     fn show_image_tab(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
         ui.heading("Image Generation");
         ui.separator();
 
@@ -1036,16 +1068,83 @@ impl ZImageApp {
             }
         });
 
-        ui.add_space(5.0);
+        ui.add_space(10.0);
 
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.use_seed, "Use seed:");
-            ui.add_enabled(
-                self.use_seed,
-                egui::DragValue::new(&mut self.seed).speed(1),
-            );
-            if ui.button("Random").clicked() {
-                self.seed = rand::random();
+        // All generation options in a visible group
+        ui.group(|ui| {
+            ui.heading("Generation Options");
+
+            // Seed
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.use_seed, "Fixed Seed:");
+                ui.add_enabled(
+                    self.use_seed,
+                    egui::DragValue::new(&mut self.seed).speed(1),
+                );
+                if ui.button("Randomize").clicked() {
+                    self.seed = rand::random();
+                }
+            });
+
+            ui.add_space(5.0);
+
+            // Scheduler settings
+            ui.horizontal(|ui| {
+                ui.label("Scheduler Shift:");
+                ui.add(egui::Slider::new(&mut self.scheduler_shift, 1.0..=5.0).step_by(0.1));
+            });
+            ui.label("Controls denoising schedule. Default: 3.0");
+
+            ui.add_space(5.0);
+
+            ui.checkbox(&mut self.use_dynamic_shifting, "Dynamic Time Shifting");
+            if self.use_dynamic_shifting {
+                ui.horizontal(|ui| {
+                    ui.label("Base:");
+                    ui.add(egui::Slider::new(&mut self.base_shift, 0.1..=1.0).step_by(0.05));
+                    ui.label("Max:");
+                    ui.add(egui::Slider::new(&mut self.max_shift, 0.5..=2.0).step_by(0.05));
+                });
+            }
+        });
+
+        ui.add_space(10.0);
+
+        // Memory optimization - always visible
+        ui.group(|ui| {
+            ui.heading("Memory Optimization");
+
+            ui.horizontal(|ui| {
+                ui.label("VRAM Preset:");
+                if ui.button("High (24GB+)").clicked() {
+                    self.attention_slice_size = 0;
+                    self.low_memory_mode = false;
+                }
+                if ui.button("Medium (16GB)").clicked() {
+                    self.attention_slice_size = 8;
+                    self.low_memory_mode = false;
+                }
+                if ui.button("Low (12GB)").clicked() {
+                    self.attention_slice_size = 4;
+                    self.low_memory_mode = true;
+                }
+                if ui.button("Very Low (8GB)").clicked() {
+                    self.attention_slice_size = 2;
+                    self.low_memory_mode = true;
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Attention Slicing:");
+                ui.add(egui::Slider::new(&mut self.attention_slice_size, 0..=30).text("heads"));
+            });
+
+            ui.checkbox(&mut self.low_memory_mode, "Low Memory Mode (saves ~7.5GB VRAM)");
+
+            if self.attention_slice_size > 0 || self.low_memory_mode {
+                ui.colored_label(egui::Color32::YELLOW,
+                    format!("Memory optimization active (slice={}, low_mem={})",
+                        self.attention_slice_size, self.low_memory_mode));
             }
         });
 
@@ -1087,6 +1186,7 @@ impl ZImageApp {
                 });
             }
         });
+        }); // End ScrollArea
     }
 
     fn show_history_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1187,73 +1287,223 @@ impl ZImageApp {
         ui.heading("Settings");
         ui.separator();
 
-        ui.group(|ui| {
-            ui.heading("Generation Settings");
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // Generation Settings
+            ui.group(|ui| {
+                ui.heading("Generation Settings");
 
-            ui.horizontal(|ui| {
-                ui.label("Inference Steps:");
-                ui.add(egui::Slider::new(&mut self.num_inference_steps, 4..=20));
-            });
-            ui.label("More steps = higher quality but slower.");
+                ui.horizontal(|ui| {
+                    ui.label("Inference Steps:");
+                    ui.add(egui::Slider::new(&mut self.num_inference_steps, 4..=20));
+                });
+                ui.label("Z-Image Turbo is optimized for 4-8 steps. More steps = higher quality but slower.");
 
-            ui.add_space(10.0);
+                ui.add_space(10.0);
 
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.use_seed, "Use Fixed Seed");
-                if self.use_seed {
-                    ui.add(egui::DragValue::new(&mut self.seed).speed(1));
-                    if ui.button("Randomize").clicked() {
-                        self.seed = rand::random();
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.use_seed, "Use Fixed Seed");
+                    if self.use_seed {
+                        ui.add(egui::DragValue::new(&mut self.seed).speed(1));
+                        if ui.button("Randomize").clicked() {
+                            self.seed = rand::random();
+                        }
                     }
+                });
+                ui.label("Fixed seed enables reproducible generation.");
+            });
+
+            ui.add_space(15.0);
+
+            // Memory Optimization - Critical section
+            ui.group(|ui| {
+                ui.heading("Memory Optimization");
+                ui.colored_label(egui::Color32::YELLOW, "Adjust these settings if you run out of VRAM");
+
+                ui.add_space(10.0);
+
+                // Attention slicing
+                ui.horizontal(|ui| {
+                    ui.label("Attention Slice Size:");
+                    ui.add(egui::Slider::new(&mut self.attention_slice_size, 0..=30));
+                });
+
+                // Memory presets
+                ui.horizontal(|ui| {
+                    ui.label("Presets:");
+                    if ui.button("High VRAM (24GB+)").clicked() {
+                        self.attention_slice_size = 0;
+                        self.low_memory_mode = false;
+                    }
+                    if ui.button("Medium (16GB)").clicked() {
+                        self.attention_slice_size = 8;
+                        self.low_memory_mode = false;
+                    }
+                    if ui.button("Low (12GB)").clicked() {
+                        self.attention_slice_size = 4;
+                        self.low_memory_mode = true;
+                    }
+                    if ui.button("Very Low (8GB)").clicked() {
+                        self.attention_slice_size = 2;
+                        self.low_memory_mode = true;
+                    }
+                });
+
+                let slice_desc = match self.attention_slice_size {
+                    0 => "No slicing - fastest, uses most memory (~24GB for 512x512)",
+                    1 => "Process 1 head at a time - slowest, minimum memory",
+                    2..=4 => "Low memory mode - slower but uses ~12-16GB",
+                    5..=8 => "Medium memory - balanced speed/memory (~16-20GB)",
+                    _ => "High slicing - more memory savings",
+                };
+                ui.label(slice_desc);
+
+                ui.add_space(10.0);
+
+                ui.checkbox(&mut self.low_memory_mode, "Low Memory Mode");
+                ui.label("Unloads text encoder during diffusion to save ~7.5GB VRAM.");
+
+                ui.add_space(10.0);
+
+                // Memory usage estimates
+                egui::CollapsingHeader::new("Memory Usage Guide").show(ui, |ui| {
+                    egui::Grid::new("memory_grid")
+                        .num_columns(4)
+                        .spacing([20.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.strong("Resolution");
+                            ui.strong("No Optimization");
+                            ui.strong("Slice=4");
+                            ui.strong("Slice=4 + Low Mem");
+                            ui.end_row();
+
+                            ui.label("256x256");
+                            ui.label("~12 GB");
+                            ui.label("~10 GB");
+                            ui.label("~6 GB");
+                            ui.end_row();
+
+                            ui.label("512x512");
+                            ui.label("~20 GB");
+                            ui.label("~16 GB");
+                            ui.label("~10 GB");
+                            ui.end_row();
+
+                            ui.label("768x768");
+                            ui.label("~28 GB");
+                            ui.label("~22 GB");
+                            ui.label("~14 GB");
+                            ui.end_row();
+
+                            ui.label("1024x1024");
+                            ui.label("~40 GB");
+                            ui.label("~30 GB");
+                            ui.label("~18 GB");
+                            ui.end_row();
+                        });
+                });
+            });
+
+            ui.add_space(15.0);
+
+            // Scheduler Settings
+            ui.group(|ui| {
+                ui.heading("Scheduler Settings");
+
+                ui.checkbox(&mut self.use_dynamic_shifting, "Use Dynamic Time Shifting");
+                ui.label("Adjusts timestep schedule based on image resolution.");
+
+                ui.add_space(10.0);
+
+                if self.use_dynamic_shifting {
+                    ui.horizontal(|ui| {
+                        ui.label("Base Shift:");
+                        ui.add(egui::Slider::new(&mut self.base_shift, 0.1..=1.0).step_by(0.05));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Max Shift:");
+                        ui.add(egui::Slider::new(&mut self.max_shift, 0.5..=2.0).step_by(0.05));
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label("Flow Matching Shift:");
+                        ui.add(egui::Slider::new(&mut self.scheduler_shift, 1.0..=5.0).step_by(0.1));
+                    });
+                    ui.label("Default: 3.0. Higher values = more denoising in early steps.");
+                }
+
+                ui.add_space(10.0);
+
+                if ui.button("Reset to Defaults").clicked() {
+                    self.scheduler_shift = 3.0;
+                    self.use_dynamic_shifting = false;
+                    self.base_shift = 0.5;
+                    self.max_shift = 1.15;
                 }
             });
-        });
 
-        ui.add_space(20.0);
+            ui.add_space(15.0);
 
-        ui.group(|ui| {
-            ui.heading("Memory Optimization");
+            // Compute Backend
+            ui.group(|ui| {
+                ui.heading("Compute Backend");
 
-            ui.horizontal(|ui| {
-                ui.label("Attention Slice Size:");
-                ui.add(egui::Slider::new(&mut self.attention_slice_size, 0..=8));
+                ui.horizontal(|ui| {
+                    ui.label("Active Backend:");
+                    ui.colored_label(egui::Color32::GREEN, BACKEND_NAME);
+                });
+
+                ui.add_space(10.0);
+                ui.label("The backend is selected at compile time.");
+
+                egui::CollapsingHeader::new("Build Commands").show(ui, |ui| {
+                    ui.label("macOS (Metal):");
+                    ui.code("cargo build --release --features \"egui,metal\"");
+                    ui.add_space(5.0);
+
+                    ui.label("Windows/Linux (NVIDIA CUDA):");
+                    ui.code("cargo build --release --features \"egui,cuda\"");
+                    ui.add_space(5.0);
+
+                    ui.label("Windows/Linux (Vulkan):");
+                    ui.code("cargo build --release --features \"egui,vulkan\"");
+                    ui.add_space(5.0);
+
+                    ui.label("CPU only:");
+                    ui.code("cargo build --release --features \"egui,cpu\"");
+                });
             });
-            ui.label("0 = No slicing (fastest). Higher = less memory but slower.");
 
-            ui.add_space(10.0);
+            ui.add_space(15.0);
 
-            ui.checkbox(&mut self.low_memory_mode, "Low Memory Mode");
-            ui.label("Unloads text encoder during diffusion to save ~7.5GB.");
-        });
+            // Current Settings Summary
+            ui.group(|ui| {
+                ui.heading("Current Configuration");
 
-        ui.add_space(20.0);
+                egui::Grid::new("config_summary")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Inference Steps:");
+                        ui.label(format!("{}", self.num_inference_steps));
+                        ui.end_row();
 
-        ui.group(|ui| {
-            ui.heading("Compute Backend");
+                        ui.label("Seed:");
+                        ui.label(if self.use_seed { format!("{}", self.seed) } else { "Random".to_string() });
+                        ui.end_row();
 
-            ui.horizontal(|ui| {
-                ui.label("Active Backend:");
-                ui.colored_label(egui::Color32::GREEN, BACKEND_NAME);
-            });
+                        ui.label("Attention Slicing:");
+                        ui.label(if self.attention_slice_size == 0 { "Disabled".to_string() } else { format!("{} heads", self.attention_slice_size) });
+                        ui.end_row();
 
-            ui.add_space(10.0);
-            ui.label("The backend is selected at compile time.");
+                        ui.label("Low Memory Mode:");
+                        ui.label(if self.low_memory_mode { "Enabled" } else { "Disabled" });
+                        ui.end_row();
 
-            egui::CollapsingHeader::new("Build Commands").show(ui, |ui| {
-                ui.label("macOS (Metal):");
-                ui.code("cargo build --release --features \"egui,metal\"");
-                ui.add_space(5.0);
-
-                ui.label("Windows/Linux (NVIDIA CUDA):");
-                ui.code("cargo build --release --features \"egui,cuda\"");
-                ui.add_space(5.0);
-
-                ui.label("Windows/Linux (Vulkan):");
-                ui.code("cargo build --release --features \"egui,vulkan\"");
-                ui.add_space(5.0);
-
-                ui.label("CPU only:");
-                ui.code("cargo build --release --features \"egui,cpu\"");
+                        ui.label("Dynamic Shifting:");
+                        ui.label(if self.use_dynamic_shifting { "Enabled" } else { "Disabled" });
+                        ui.end_row();
+                    });
             });
         });
     }
@@ -1481,31 +1731,69 @@ impl ZImageApp {
         ui: &mut egui::Ui,
         name: &str,
         filename: &str,
-        size: &str,
+        expected_size: &str,
         url: &str,
         subdir: &str,
     ) {
         let id = filename.replace('.', "_");
         let dest_dir = format!("{}/{}", self.models_base_dir, subdir);
         let file_path = format!("{}/{}", dest_dir, filename);
-        let file_exists = std::path::Path::new(&file_path).exists();
+        let path = std::path::Path::new(&file_path);
+
+        // Parse expected size to bytes for comparison
+        let expected_bytes = parse_size_str(expected_size);
+
+        // Check file status
+        let (file_exists, actual_size) = if path.exists() {
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            (true, size)
+        } else {
+            (false, 0)
+        };
+
+        // Determine if file is valid (exists and size is reasonable - within 10%)
+        let is_valid = file_exists && expected_bytes > 0 && {
+            let min_expected = (expected_bytes as f64 * 0.9) as u64;
+            actual_size >= min_expected
+        };
 
         ui.horizontal(|ui| {
-            ui.label(format!("{} ({})", name, size));
+            // Name and expected size
+            ui.label(format!("{}", name));
+            ui.label(format!("({})", expected_size));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if file_exists {
-                    ui.colored_label(egui::Color32::GREEN, "Ready");
+                if is_valid {
+                    // File exists and size matches
+                    ui.colored_label(egui::Color32::GREEN, format!("✓ {}", format_bytes(actual_size)));
+                } else if file_exists && !is_valid {
+                    // File exists but size is wrong - offer to redownload
+                    ui.colored_label(egui::Color32::YELLOW, format!("⚠ {} (incomplete)", format_bytes(actual_size)));
+                    if ui.button("Redownload").clicked() {
+                        // Delete corrupt file and start fresh
+                        let _ = std::fs::remove_file(&file_path);
+                        self.start_download(&id, url, &dest_dir, expected_bytes);
+                    }
                 } else if let Some(progress) = self.download_progress.get(&id) {
-                    ui.add(egui::ProgressBar::new(*progress).show_percentage());
-                } else if ui.button("Download").clicked() {
-                    self.start_download(&id, url, &dest_dir);
+                    // Currently downloading
+                    let progress_val = *progress;
+                    ui.add(egui::ProgressBar::new(progress_val).show_percentage().desired_width(150.0));
+                    if progress_val > 0.0 && progress_val < 1.0 {
+                        // Show downloaded bytes
+                        let downloaded = (expected_bytes as f64 * progress_val as f64) as u64;
+                        ui.label(format!("{} / {}", format_bytes(downloaded), expected_size));
+                    }
+                } else {
+                    // Not downloaded yet
+                    if ui.button("Download").clicked() {
+                        self.start_download(&id, url, &dest_dir, expected_bytes);
+                    }
                 }
             });
         });
     }
 
-    fn start_download(&mut self, id: &str, url: &str, dest_dir: &str) {
+    fn start_download(&mut self, id: &str, url: &str, dest_dir: &str, expected_bytes: u64) {
         let id = id.to_string();
         let url = url.to_string();
         let dest_dir = dest_dir.to_string();
@@ -1513,6 +1801,7 @@ impl ZImageApp {
 
         self.download_progress.insert(id.clone(), 0.0);
         self.log(&format!("Starting download: {}", url));
+        self.log(&format!("Expected size: {}", format_bytes(expected_bytes)));
 
         thread::spawn(move || {
             if let Err(e) = std::fs::create_dir_all(&dest_dir) {
@@ -1526,9 +1815,51 @@ impl ZImageApp {
             let filename = url.split('/').last().unwrap_or("download");
             let file_path = format!("{}/{}", dest_dir, filename);
 
-            match reqwest::blocking::get(&url) {
+            // Build a client with proper settings for HuggingFace LFS
+            let client = match reqwest::blocking::Client::builder()
+                .redirect(reqwest::redirect::Policy::limited(10))
+                .timeout(std::time::Duration::from_secs(7200)) // 2 hour timeout for large files
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .user_agent("z-image-app/1.0")
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(WorkerMessage::DownloadComplete(
+                        id,
+                        Err(format!("Failed to create HTTP client: {}", e)),
+                    ));
+                    return;
+                }
+            };
+
+            eprintln!("[download] Requesting: {}", url);
+
+            match client.get(&url).send() {
                 Ok(response) => {
-                    let total_size = response.content_length().unwrap_or(0);
+                    let status = response.status();
+                    eprintln!("[download] Response status: {}", status);
+
+                    // Check HTTP status
+                    if !status.is_success() {
+                        let _ = tx.send(WorkerMessage::DownloadComplete(
+                            id,
+                            Err(format!("HTTP error: {} - URL may require authentication", status)),
+                        ));
+                        return;
+                    }
+
+                    // Get content length from response, fall back to expected size
+                    let total_size = response.content_length().unwrap_or(expected_bytes);
+                    eprintln!("[download] {} - Content-Length: {} bytes ({:.2} GB)",
+                        filename, total_size, total_size as f64 / 1_073_741_824.0);
+
+                    // Warn if server reports much smaller size than expected
+                    if total_size > 0 && expected_bytes > 0 && total_size < expected_bytes / 2 {
+                        eprintln!("[download] WARNING: Server reports {} bytes but expected {} bytes",
+                            total_size, expected_bytes);
+                    }
+
                     let mut file = match std::fs::File::create(&file_path) {
                         Ok(f) => f,
                         Err(e) => {
@@ -1542,10 +1873,12 @@ impl ZImageApp {
 
                     let mut downloaded: u64 = 0;
                     let mut reader = response;
+                    let mut last_progress_update = std::time::Instant::now();
 
                     loop {
                         use std::io::Read;
-                        let mut buffer = [0u8; 8192];
+                        // Use larger buffer for better throughput
+                        let mut buffer = [0u8; 131072]; // 128KB buffer
                         match reader.read(&mut buffer) {
                             Ok(0) => break,
                             Ok(n) => {
@@ -1558,12 +1891,19 @@ impl ZImageApp {
                                     return;
                                 }
                                 downloaded += n as u64;
-                                if total_size > 0 {
-                                    let progress = downloaded as f32 / total_size as f32;
+
+                                // Update progress every 100ms to avoid flooding the UI
+                                if last_progress_update.elapsed().as_millis() > 100 {
+                                    let progress = if total_size > 0 {
+                                        (downloaded as f32 / total_size as f32).min(1.0)
+                                    } else {
+                                        0.0
+                                    };
                                     let _ = tx.send(WorkerMessage::DownloadProgress(
                                         id.clone(),
                                         progress,
                                     ));
+                                    last_progress_update = std::time::Instant::now();
                                 }
                             }
                             Err(e) => {
@@ -1576,6 +1916,41 @@ impl ZImageApp {
                         }
                     }
 
+                    // Flush and sync file
+                    use std::io::Write;
+                    let _ = file.flush();
+                    let _ = file.sync_all();
+
+                    // Verify downloaded file size
+                    let file_size = std::fs::metadata(&file_path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+
+                    eprintln!("[download] {} complete - {} bytes ({:.2} GB)",
+                        filename, file_size, file_size as f64 / 1_073_741_824.0);
+
+                    // Check if download was successful
+                    let min_expected = if expected_bytes > 0 {
+                        (expected_bytes as f64 * 0.9) as u64
+                    } else {
+                        1_000_000 // At least 1MB for model files
+                    };
+
+                    if file_size < min_expected {
+                        let _ = tx.send(WorkerMessage::DownloadComplete(
+                            id.clone(),
+                            Err(format!(
+                                "Download incomplete: got {} but expected at least {}. The file may be a redirect page.",
+                                format_bytes(file_size),
+                                format_bytes(min_expected)
+                            )),
+                        ));
+                        // Delete the partial/corrupt file
+                        let _ = std::fs::remove_file(&file_path);
+                        return;
+                    }
+
+                    let _ = tx.send(WorkerMessage::DownloadProgress(id.clone(), 1.0));
                     let _ = tx.send(WorkerMessage::DownloadComplete(id, Ok(())));
                 }
                 Err(e) => {
@@ -1586,5 +1961,45 @@ impl ZImageApp {
                 }
             }
         });
+    }
+}
+
+/// Parse a size string like "12.3 GB" or "198 MB" to bytes
+fn parse_size_str(s: &str) -> u64 {
+    let s = s.trim().to_uppercase();
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.len() != 2 {
+        return 0;
+    }
+
+    let num: f64 = match parts[0].parse() {
+        Ok(n) => n,
+        Err(_) => return 0,
+    };
+
+    match parts[1] {
+        "B" => num as u64,
+        "KB" => (num * 1_024.0) as u64,
+        "MB" => (num * 1_048_576.0) as u64,
+        "GB" => (num * 1_073_741_824.0) as u64,
+        "TB" => (num * 1_099_511_627_776.0) as u64,
+        _ => 0,
+    }
+}
+
+/// Format bytes as human-readable string
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.0} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
     }
 }

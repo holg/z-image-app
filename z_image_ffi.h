@@ -8,96 +8,132 @@
 extern "C" {
 #endif
 
-// Generation settings structure
-typedef struct {
-    int32_t num_inference_steps;  // 4-20, default 8
-    int64_t seed;                 // 0 for random
-    bool use_attention_slicing;   // Memory optimization
-    int32_t slice_size;           // Attention slice size (0 for auto)
-    bool low_memory_mode;         // Unload text encoder during diffusion
-} ZImageGenerationSettings;
+// ============================================================================
+// Initialization
+// ============================================================================
 
-// Create default generation settings
-ZImageGenerationSettings z_image_default_settings(void);
+// Initialize the GPU device (Metal on macOS, CUDA on Windows/Linux)
+// Must be called before any other functions
+// Returns: 0 on success, negative error code on failure
+int32_t z_image_init(void);
 
-// Load image generation models into memory
+// ============================================================================
+// Image Generation Models
+// ============================================================================
+
+// Load image generation models into GPU memory
 // model_dir: path to directory containing .bpk model files
 // Returns: 0 on success, negative error code on failure
 int32_t z_image_load_models(const char* model_dir);
 
-// Unload image generation models from memory
-// Returns: 0 on success, negative error code on failure
+// Unload image generation models from GPU memory
+// Returns: 0 on success
 int32_t z_image_unload_models(void);
 
 // Check if image models are loaded
-// Returns: true if models are loaded
-bool z_image_models_loaded(void);
+// Returns: 1 if models are loaded, 0 otherwise
+int32_t z_image_models_loaded(void);
+
+// ============================================================================
+// Image Generation
+// ============================================================================
 
 // Generate an image from a text prompt
 // prompt: text description of the image to generate
-// width: image width (multiple of 16, e.g., 512, 768, 1024)
-// height: image height (multiple of 16)
-// model_dir: path to directory containing model files
 // output_path: path where to save the generated PNG image
-// settings: generation settings (can be NULL for defaults)
+// model_dir: path to directory containing model files
+// width: image width (multiple of 16, e.g., 256, 512, 768, 1024)
+// height: image height (multiple of 16)
 // Returns: 0 on success, negative error code on failure
 int32_t z_image_generate(
     const char* prompt,
-    int32_t width,
-    int32_t height,
+    const char* output_path,
     const char* model_dir,
-    const char* output_path,
-    const ZImageGenerationSettings* settings
-);
-
-// Generate image with cached models (must call z_image_load_models first)
-// prompt: text description
-// width: image width
-// height: image height
-// output_path: output PNG path
-// settings: generation settings (can be NULL for defaults)
-// Returns: 0 on success, negative error code on failure
-int32_t z_image_generate_cached(
-    const char* prompt,
     int32_t width,
-    int32_t height,
-    const char* output_path,
-    const ZImageGenerationSettings* settings
+    int32_t height
 );
 
-// Load chat model (Qwen3-0.6B)
+// ============================================================================
+// Generation Settings
+// ============================================================================
+
+// Set the number of inference steps (4-50, default: 8)
+// Z-Image Turbo is optimized for 4-8 steps
+// Returns: 0 on success
+int32_t z_image_set_num_steps(int32_t steps);
+
+// Get the current number of inference steps
+int32_t z_image_get_num_steps(void);
+
+// Set the random seed for reproducible generation
+// seed: random seed (0 to disable fixed seed and use random)
+// Returns: 0 on success
+int32_t z_image_set_seed(uint64_t seed);
+
+// Get the current random seed (0 if using random)
+uint64_t z_image_get_seed(void);
+
+// ============================================================================
+// Memory Optimization
+// ============================================================================
+
+// Set attention slice size for memory optimization
+// slice_size: 0 = no slicing (fastest, most memory)
+//             1 = process 1 head at a time (slowest, least memory)
+//             2-4 = low memory (~12-16GB VRAM)
+//             5-8 = medium memory (~16-20GB VRAM)
+//             8+ = high memory savings
+// Returns: 0 on success
+int32_t z_image_set_attention_slice_size(int32_t slice_size);
+
+// Get the current attention slice size
+int32_t z_image_get_attention_slice_size(void);
+
+// Enable/disable low memory mode
+// When enabled, text encoder is unloaded during diffusion to save ~7.5GB VRAM
+// enabled: 1 to enable, 0 to disable
+// Returns: 0 on success
+int32_t z_image_set_low_memory_mode(int32_t enabled);
+
+// Check if low memory mode is enabled
+// Returns: 1 if enabled, 0 if disabled
+int32_t z_image_get_low_memory_mode(void);
+
+
+// ============================================================================
+// Text Chat (Qwen3-0.6B)
+// ============================================================================
+
+// Initialize the text generation model
 // model_dir: path to directory containing chat model files
 // Returns: 0 on success, negative error code on failure
-int32_t z_image_load_chat_model(const char* model_dir);
+int32_t qwen3_init(const char* model_dir);
 
-// Unload chat model from memory
-// Returns: 0 on success, negative error code on failure
-int32_t z_image_unload_chat_model(void);
+// Check if text generation model is loaded
+// Returns: 1 if model is loaded, 0 otherwise
+int32_t qwen3_is_loaded(void);
 
-// Check if chat model is loaded
-// Returns: true if chat model is loaded
-bool z_image_chat_model_loaded(void);
-
-// Generate chat response
+// Generate text from a prompt
 // prompt: user message
 // max_tokens: maximum tokens to generate
-// output_buffer: buffer to store the response
-// buffer_size: size of output buffer
-// Returns: length of response on success, negative error code on failure
-int32_t z_image_chat(
-    const char* prompt,
-    int32_t max_tokens,
-    char* output_buffer,
-    int32_t buffer_size
-);
+// temperature: sampling temperature (0.0-1.5)
+// Returns: pointer to generated text (caller must free with z_image_free_string)
+char* qwen3_generate(const char* prompt, int32_t max_tokens, float temperature);
 
-// Get last error message
+// Unload text generation model from GPU memory
+// Returns: 0 on success
+int32_t qwen3_unload(void);
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+// Get the last error message
 // Returns: pointer to error string (valid until next call)
-const char* z_image_get_last_error(void);
+char* z_image_get_error(void);
 
-// Get library version
-// Returns: version string
-const char* z_image_version(void);
+// Free a string returned by this library
+void z_image_free_string(char* s);
 
 #ifdef __cplusplus
 }

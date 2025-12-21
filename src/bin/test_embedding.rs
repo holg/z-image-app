@@ -73,9 +73,12 @@ fn main() {
         attention_mask.iter().map(|&b| if b { 1.0f32 } else { 0.0f32 }).collect::<Vec<_>>().as_slice(),
         &device,
     ).reshape([1, seq_len]);
-    let _attention_mask = mask_tensor.greater_elem(0.5);
 
     eprintln!("Computing embedding...");
-    let embedding = model.forward(input_tensor);
-    eprintln!("Embedding shape: {:?}", embedding.dims());
+    let attention_mask_bool = mask_tensor.greater_elem(0.5);
+    let embeddings = model.forward(input_tensor, Some(attention_mask_bool));
+    eprintln!("Got {} embedding tensors", embeddings.len());
+    if let Some(first) = embeddings.first() {
+        eprintln!("First embedding shape: {:?}", first.dims());
+    }
 }

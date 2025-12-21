@@ -53,7 +53,7 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 800, minHeight: 600)
+        .frame(minWidth: 900, minHeight: 700)
     }
 }
 
@@ -95,105 +95,200 @@ struct ImageGenerationView: View {
     @State private var height: Double = 512
     @State private var numSteps: Double = 8
     @State private var seed: String = "0"
+    @State private var useSeed = false
     @State private var generatedImage: NSImage?
     @State private var isGenerating = false
+
+    // Memory settings
+    @State private var selectedPreset: VRAMPreset = .high
+    @State private var attentionSliceSize: Double = 0
+    @State private var lowMemoryMode = false
 
     var body: some View {
         HSplitView {
             // Left panel - Controls
-            VStack(alignment: .leading, spacing: 16) {
-                // Model status
-                HStack {
-                    Circle()
-                        .fill(modelsLoaded ? Color.green : Color.red)
-                        .frame(width: 10, height: 10)
-                    Text(modelsLoaded ? "Models Loaded" : "Models Not Loaded")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Model status
+                    HStack {
+                        Circle()
+                            .fill(modelsLoaded ? Color.green : Color.red)
+                            .frame(width: 10, height: 10)
+                        Text(modelsLoaded ? "Models Loaded" : "Models Not Loaded")
+                            .font(.caption)
+                        Spacer()
+                        if !modelsLoaded && !modelDirectory.isEmpty {
+                            Button("Load Models") {
+                                loadModels()
+                            }
+                            .disabled(isLoading)
+                        }
+                    }
+
+                    // Prompt input
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Prompt")
+                            .font(.headline)
+                        TextEditor(text: $prompt)
+                            .frame(height: 80)
+                            .font(.body)
+                            .padding(4)
+                            .background(Color(NSColor.textBackgroundColor))
+                            .cornerRadius(8)
+                    }
+
+                    // Size controls
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Image Size")
+                            .font(.headline)
+
+                        HStack {
+                            Text("Width:")
+                            Slider(value: $width, in: 256...1024, step: 64)
+                            Text("\(Int(width))")
+                                .frame(width: 50)
+                        }
+
+                        HStack {
+                            Text("Height:")
+                            Slider(value: $height, in: 256...1024, step: 64)
+                            Text("\(Int(height))")
+                                .frame(width: 50)
+                        }
+
+                        // Size presets
+                        HStack {
+                            Text("Presets:")
+                                .font(.caption)
+                            Button("256") { width = 256; height = 256 }
+                            Button("512") { width = 512; height = 512 }
+                            Button("768") { width = 768; height = 768 }
+                            Button("1024") { width = 1024; height = 1024 }
+                        }
                         .font(.caption)
+                    }
+
+                    // Generation settings - Always visible
+                    GroupBox("Generation Options") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("Inference Steps:")
+                                Slider(value: $numSteps, in: 4...20, step: 1)
+                                Text("\(Int(numSteps))")
+                                    .frame(width: 30)
+                                    .monospacedDigit()
+                            }
+                            Text("Z-Image Turbo is optimized for 4-8 steps")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            Divider()
+
+                            HStack {
+                                Toggle("Fixed Seed:", isOn: $useSeed)
+                                    .toggleStyle(.checkbox)
+                                TextField("Seed", text: $seed)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 100)
+                                    .disabled(!useSeed)
+                                if useSeed {
+                                    Button("Random") {
+                                        seed = String(UInt64.random(in: 1...UInt64.max))
+                                    }
+                                }
+                            }
+                        }
+                        .padding(8)
+                    }
+
+                    // Memory optimization - Always visible
+                    GroupBox("Memory Optimization") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            // VRAM Presets
+                            Text("VRAM Preset")
+                                .font(.subheadline)
+                            Picker("", selection: $selectedPreset) {
+                                ForEach(VRAMPreset.allCases, id: \.self) { preset in
+                                    Text(preset.rawValue).tag(preset)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .onChange(of: selectedPreset) { newValue in
+                                applyPreset(newValue)
+                            }
+
+                            Divider()
+
+                            // Attention slicing
+                            HStack {
+                                Text("Attention Slicing:")
+                                Slider(value: $attentionSliceSize, in: 0...30, step: 1)
+                                Text("\(Int(attentionSliceSize))")
+                                    .frame(width: 30)
+                                    .monospacedDigit()
+                            }
+                            Text(attentionSliceDescription)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            // Low memory mode
+                            Toggle("Low Memory Mode (saves ~7.5GB VRAM)", isOn: $lowMemoryMode)
+                                .toggleStyle(.checkbox)
+                                .onChange(of: lowMemoryMode) { newValue in
+                                    ZImageBridge.shared.setLowMemoryMode(newValue)
+                                }
+
+                            // Status indicator
+                            if attentionSliceSize > 0 || lowMemoryMode {
+                                HStack {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.orange)
+                                    Text("Memory optimization active")
+                                        .font(.caption)
+                                        .foregroundColor(.orange)
+                                }
+                            }
+
+                            Divider()
+
+                            // Memory usage estimate
+                            HStack {
+                                Text("Estimated VRAM:")
+                                    .font(.caption)
+                                Text(estimatedMemoryUsage)
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                                    .bold()
+                            }
+                        }
+                        .padding(8)
+                    }
+
                     Spacer()
-                    if !modelsLoaded && !modelDirectory.isEmpty {
-                        Button("Load Models") {
-                            loadModels()
+
+                    // Generate button
+                    Button(action: generateImage) {
+                        HStack {
+                            if isGenerating {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                            }
+                            Text(isGenerating ? "Generating..." : "Generate Image")
                         }
-                        .disabled(isLoading)
+                        .frame(maxWidth: .infinity)
+                        .padding()
                     }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!modelsLoaded || isGenerating || prompt.isEmpty)
+
+                    // Status
+                    Text(statusMessage)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-
-                // Prompt input
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Prompt")
-                        .font(.headline)
-                    TextEditor(text: $prompt)
-                        .frame(height: 100)
-                        .font(.body)
-                        .padding(4)
-                        .background(Color(NSColor.textBackgroundColor))
-                        .cornerRadius(8)
-                }
-
-                // Size controls
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Image Size")
-                        .font(.headline)
-
-                    HStack {
-                        Text("Width:")
-                        Slider(value: $width, in: 256...1024, step: 64)
-                        Text("\(Int(width))")
-                            .frame(width: 50)
-                    }
-
-                    HStack {
-                        Text("Height:")
-                        Slider(value: $height, in: 256...1024, step: 64)
-                        Text("\(Int(height))")
-                            .frame(width: 50)
-                    }
-                }
-
-                // Generation settings
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Settings")
-                        .font(.headline)
-
-                    HStack {
-                        Text("Steps:")
-                        Slider(value: $numSteps, in: 4...20, step: 1)
-                        Text("\(Int(numSteps))")
-                            .frame(width: 30)
-                    }
-
-                    HStack {
-                        Text("Seed:")
-                        TextField("0 for random", text: $seed)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 120)
-                    }
-                }
-
-                Spacer()
-
-                // Generate button
-                Button(action: generateImage) {
-                    HStack {
-                        if isGenerating {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                        }
-                        Text(isGenerating ? "Generating..." : "Generate Image")
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!modelsLoaded || isGenerating || prompt.isEmpty)
-
-                // Status
-                Text(statusMessage)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                .padding()
             }
-            .padding()
-            .frame(minWidth: 300, maxWidth: 400)
+            .frame(minWidth: 320, maxWidth: 420)
 
             // Right panel - Image preview
             VStack {
@@ -223,6 +318,42 @@ struct ImageGenerationView: View {
         }
     }
 
+    private var attentionSliceDescription: String {
+        switch Int(attentionSliceSize) {
+        case 0: return "No slicing - fastest, uses most memory"
+        case 1: return "Process 1 head at a time - slowest, minimum memory"
+        case 2...4: return "Low memory mode - slower but uses ~12-16GB"
+        case 5...8: return "Medium memory - balanced speed/memory"
+        default: return "High slicing - more memory savings"
+        }
+    }
+
+    private var estimatedMemoryUsage: String {
+        let baseMemory: Double
+        switch Int(width) {
+        case 256: baseMemory = 12
+        case 512: baseMemory = 20
+        case 768: baseMemory = 28
+        default: baseMemory = 40
+        }
+
+        var adjusted = baseMemory
+        if attentionSliceSize >= 4 {
+            adjusted *= 0.75
+        }
+        if lowMemoryMode {
+            adjusted -= 7.5
+        }
+
+        return String(format: "~%.0f GB for %dx%d", max(adjusted, 6), Int(width), Int(height))
+    }
+
+    private func applyPreset(_ preset: VRAMPreset) {
+        preset.apply()
+        attentionSliceSize = Double(preset.attentionSliceSize)
+        lowMemoryMode = preset.lowMemoryMode
+    }
+
     private func loadModels() {
         isLoading = true
         statusMessage = "Loading models..."
@@ -242,23 +373,28 @@ struct ImageGenerationView: View {
         isGenerating = true
         statusMessage = "Generating image..."
 
-        let seedValue = Int64(seed) ?? 0
-        let settings = ZImageGenerationSettings.custom(
-            numInferenceSteps: Int32(numSteps),
-            seed: seedValue
-        )
+        // Apply settings
+        ZImageBridge.shared.setNumSteps(Int32(numSteps))
+        ZImageBridge.shared.setAttentionSliceSize(Int32(attentionSliceSize))
+        ZImageBridge.shared.setLowMemoryMode(lowMemoryMode)
+
+        if useSeed, let seedValue = UInt64(seed) {
+            ZImageBridge.shared.setSeed(seedValue)
+        } else {
+            ZImageBridge.shared.setSeed(0)
+        }
 
         let tempPath = FileManager.default.temporaryDirectory
             .appendingPathComponent("z_image_\(UUID().uuidString).png")
             .path
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let success = ZImageBridge.shared.generateImageCached(
+            let success = ZImageBridge.shared.generateImage(
                 prompt: prompt,
                 width: Int32(width),
                 height: Int32(height),
-                outputPath: tempPath,
-                settings: settings
+                modelDir: modelDirectory,
+                outputPath: tempPath
             )
 
             DispatchQueue.main.async {
@@ -308,6 +444,8 @@ struct ChatView: View {
     @State private var inputText = ""
     @State private var isChatting = false
     @State private var chatModelLoaded = false
+    @State private var maxTokens: Double = 512
+    @State private var temperature: Double = 0.7
 
     var body: some View {
         VStack {
@@ -326,6 +464,27 @@ struct ChatView: View {
                 }
             }
             .padding()
+
+            // Settings row
+            HStack {
+                Text("Max Tokens:")
+                    .font(.caption)
+                Slider(value: $maxTokens, in: 32...1024, step: 32)
+                Text("\(Int(maxTokens))")
+                    .font(.caption)
+                    .frame(width: 40)
+
+                Divider()
+                    .frame(height: 20)
+
+                Text("Temperature:")
+                    .font(.caption)
+                Slider(value: $temperature, in: 0...1.5, step: 0.1)
+                Text(String(format: "%.1f", temperature))
+                    .font(.caption)
+                    .frame(width: 30)
+            }
+            .padding(.horizontal)
 
             // Chat messages
             ScrollView {
@@ -372,7 +531,11 @@ struct ChatView: View {
         isChatting = true
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let response = ZImageBridge.shared.chat(prompt: userMessage, maxTokens: 512)
+            let response = ZImageBridge.shared.chat(
+                prompt: userMessage,
+                maxTokens: Int32(maxTokens),
+                temperature: Float(temperature)
+            )
 
             DispatchQueue.main.async {
                 isChatting = false
@@ -413,59 +576,177 @@ struct SettingsView: View {
     @Binding var isLoading: Bool
     @Binding var statusMessage: String
 
+    @State private var attentionSliceSize: Int32 = 0
+    @State private var lowMemoryMode = false
+    @State private var numSteps: Int32 = 8
+
     var body: some View {
-        Form {
-            Section("Model Directory") {
-                HStack {
-                    TextField("Path to models", text: $modelDirectory)
-                        .textFieldStyle(.roundedBorder)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                // Model Directory
+                GroupBox("Model Directory") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            TextField("Path to models", text: $modelDirectory)
+                                .textFieldStyle(.roundedBorder)
 
-                    Button("Browse...") {
-                        selectModelDirectory()
-                    }
-                }
-
-                Text("Directory should contain: ae.bpk, qwen3_4b_text_encoder.bpk, z_image_turbo.bpk")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            Section("Model Status") {
-                HStack {
-                    Text("Image Models:")
-                    Spacer()
-                    if modelsLoaded {
-                        Text("Loaded")
-                            .foregroundColor(.green)
-                        Button("Unload") {
-                            unloadModels()
-                        }
-                    } else {
-                        Text("Not Loaded")
-                            .foregroundColor(.red)
-                        if !modelDirectory.isEmpty {
-                            Button("Load") {
-                                loadModels()
+                            Button("Browse...") {
+                                selectModelDirectory()
                             }
-                            .disabled(isLoading)
+                        }
+
+                        Text("Directory should contain: ae.bpk, qwen3_4b_text_encoder.bpk, z_image_turbo_bf16.bpk")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                }
+
+                // Model Status
+                GroupBox("Model Status") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Image Models:")
+                            Spacer()
+                            if modelsLoaded {
+                                Text("Loaded")
+                                    .foregroundColor(.green)
+                                Button("Unload") {
+                                    unloadModels()
+                                }
+                            } else {
+                                Text("Not Loaded")
+                                    .foregroundColor(.red)
+                                if !modelDirectory.isEmpty {
+                                    Button("Load") {
+                                        loadModels()
+                                    }
+                                    .disabled(isLoading)
+                                }
+                            }
+                        }
+
+                        if isLoading {
+                            ProgressView()
                         }
                     }
+                    .padding()
                 }
 
-                if isLoading {
-                    ProgressView()
-                }
-            }
+                // Memory Optimization
+                GroupBox("Memory Optimization") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Adjust these settings if you run out of VRAM")
+                            .font(.caption)
+                            .foregroundColor(.orange)
 
-            Section("About") {
-                HStack {
-                    Text("Library Version:")
-                    Spacer()
-                    Text(ZImageBridge.shared.version)
+                        // VRAM Presets
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("VRAM Presets")
+                                .font(.subheadline)
+                            HStack {
+                                ForEach(VRAMPreset.allCases, id: \.self) { preset in
+                                    Button(preset.rawValue) {
+                                        preset.apply()
+                                        attentionSliceSize = preset.attentionSliceSize
+                                        lowMemoryMode = preset.lowMemoryMode
+                                    }
+                                    .buttonStyle(.bordered)
+                                }
+                            }
+                        }
+
+                        Divider()
+
+                        // Manual controls
+                        HStack {
+                            Text("Attention Slice Size:")
+                            Picker("", selection: $attentionSliceSize) {
+                                Text("0 (No slicing)").tag(Int32(0))
+                                Text("2").tag(Int32(2))
+                                Text("4").tag(Int32(4))
+                                Text("8").tag(Int32(8))
+                                Text("16").tag(Int32(16))
+                            }
+                            .onChange(of: attentionSliceSize) { newValue in
+                                ZImageBridge.shared.setAttentionSliceSize(newValue)
+                            }
+                        }
+
+                        Toggle("Low Memory Mode (unloads text encoder during diffusion)", isOn: $lowMemoryMode)
+                            .toggleStyle(.checkbox)
+                            .onChange(of: lowMemoryMode) { newValue in
+                                ZImageBridge.shared.setLowMemoryMode(newValue)
+                            }
+
+                        // Memory guide
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Memory Usage Guide")
+                                .font(.subheadline)
+                            Grid(alignment: .leading) {
+                                GridRow {
+                                    Text("Resolution").bold()
+                                    Text("No Optimization").bold()
+                                    Text("Slice=4").bold()
+                                    Text("+ Low Mem").bold()
+                                }
+                                GridRow {
+                                    Text("256x256")
+                                    Text("~12 GB")
+                                    Text("~10 GB")
+                                    Text("~6 GB")
+                                }
+                                GridRow {
+                                    Text("512x512")
+                                    Text("~20 GB")
+                                    Text("~16 GB")
+                                    Text("~10 GB")
+                                }
+                                GridRow {
+                                    Text("768x768")
+                                    Text("~28 GB")
+                                    Text("~22 GB")
+                                    Text("~14 GB")
+                                }
+                                GridRow {
+                                    Text("1024x1024")
+                                    Text("~40 GB")
+                                    Text("~30 GB")
+                                    Text("~18 GB")
+                                }
+                            }
+                            .font(.caption)
+                        }
+                    }
+                    .padding()
+                }
+
+                // Default Generation Settings
+                GroupBox("Default Generation Settings") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Inference Steps:")
+                            Picker("", selection: $numSteps) {
+                                Text("4").tag(Int32(4))
+                                Text("6").tag(Int32(6))
+                                Text("8 (default)").tag(Int32(8))
+                                Text("12").tag(Int32(12))
+                                Text("16").tag(Int32(16))
+                                Text("20").tag(Int32(20))
+                            }
+                            .onChange(of: numSteps) { newValue in
+                                ZImageBridge.shared.setNumSteps(newValue)
+                            }
+                        }
+                        Text("Z-Image Turbo is optimized for 4-8 steps.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
                 }
             }
+            .padding()
         }
-        .padding()
     }
 
     private func selectModelDirectory() {

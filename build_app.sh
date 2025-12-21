@@ -20,7 +20,7 @@ echo -e "${YELLOW}Building Rust library...${NC}"
 cargo build --release --lib
 
 # Check if library was built
-DYLIB_PATH="target/release/libz_image_app.dylib"
+DYLIB_PATH="target/release/libz_image_ffi.dylib"
 if [ ! -f "$DYLIB_PATH" ]; then
     echo -e "${RED}Error: Rust library not found at $DYLIB_PATH${NC}"
     exit 1
@@ -44,7 +44,7 @@ mkdir -p "$FRAMEWORKS_DIR"
 
 # Step 3: Copy the dylib
 echo -e "${YELLOW}Copying library...${NC}"
-cp "$DYLIB_PATH" "$FRAMEWORKS_DIR/libz_image_app.dylib"
+cp "$DYLIB_PATH" "$FRAMEWORKS_DIR/libz_image_ffi.dylib"
 
 # Step 4: Create Info.plist
 echo -e "${YELLOW}Creating Info.plist...${NC}"
@@ -79,68 +79,55 @@ cat > "$CONTENTS_DIR/Info.plist" << 'EOF'
 </plist>
 EOF
 
-# Step 5: Build Swift app
+# Step 5: Build Swift app using swiftc directly
 echo -e "${YELLOW}Building Swift app...${NC}"
 
-# Create a temporary Swift package for building
-SWIFT_BUILD_DIR="$SCRIPT_DIR/.swift-build"
-rm -rf "$SWIFT_BUILD_DIR"
-mkdir -p "$SWIFT_BUILD_DIR/Sources/ZImage"
+# Create a bridging header that imports the FFI header directly
+BRIDGE_HEADER="/tmp/ZImage-Bridging-Header.h"
+cat > "$BRIDGE_HEADER" << EOF
+#ifndef ZImage_Bridging_Header_h
+#define ZImage_Bridging_Header_h
 
-# Copy Swift sources
-cp ZImageApp/*.swift "$SWIFT_BUILD_DIR/Sources/ZImage/"
+#include "$SCRIPT_DIR/z_image_ffi.h"
 
-# Create Package.swift
-cat > "$SWIFT_BUILD_DIR/Package.swift" << EOF
-// swift-tools-version:5.9
-import PackageDescription
-
-let package = Package(
-    name: "ZImage",
-    platforms: [.macOS(.v13)],
-    products: [
-        .executable(name: "ZImage", targets: ["ZImage"])
-    ],
-    targets: [
-        .executableTarget(
-            name: "ZImage",
-            path: "Sources/ZImage",
-            swiftSettings: [
-                .unsafeFlags([
-                    "-I", "$SCRIPT_DIR",
-                    "-L", "$SCRIPT_DIR/target/release",
-                    "-lz_image_app"
-                ])
-            ],
-            linkerSettings: [
-                .unsafeFlags([
-                    "-L", "$SCRIPT_DIR/target/release",
-                    "-lz_image_app",
-                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"
-                ])
-            ]
-        )
-    ]
-)
+#endif
 EOF
 
-# Build with Swift
-cd "$SWIFT_BUILD_DIR"
-swift build -c release
+# Compile Swift sources (exclude module.modulemap)
+SWIFT_FILES=$(find "$SCRIPT_DIR/ZImageApp" -name "*.swift" -type f)
 
-# Copy executable
-cp ".build/release/ZImage" "$MACOS_DIR/"
-cd "$SCRIPT_DIR"
+swiftc \
+    -O \
+    -whole-module-optimization \
+    -target arm64-apple-macos13.0 \
+    -sdk $(xcrun --show-sdk-path) \
+    -import-objc-header "$BRIDGE_HEADER" \
+    -I "$SCRIPT_DIR" \
+    -L "$SCRIPT_DIR/target/release" \
+    -lz_image_ffi \
+    -Xlinker -rpath -Xlinker "@executable_path/../Frameworks" \
+    -o "$MACOS_DIR/ZImage" \
+    $SWIFT_FILES
+
+# Clean up bridging header
+rm -f "$BRIDGE_HEADER"
+
+echo -e "${GREEN}Swift app compiled successfully${NC}"
 
 # Step 6: Fix library paths
 echo -e "${YELLOW}Fixing library paths...${NC}"
 install_name_tool -change \
-    "target/release/libz_image_app.dylib" \
-    "@executable_path/../Frameworks/libz_image_app.dylib" \
+    "target/release/libz_image_ffi.dylib" \
+    "@executable_path/../Frameworks/libz_image_ffi.dylib" \
     "$MACOS_DIR/ZImage" 2>/dev/null || true
 
+# Also fix the library's own install name
+install_name_tool -id \
+    "@executable_path/../Frameworks/libz_image_ffi.dylib" \
+    "$FRAMEWORKS_DIR/libz_image_ffi.dylib" 2>/dev/null || true
+
 # Clean up
-rm -rf "$SWIFT_BUILD_DIR"
+rm -f "$BRIDGE_HEADER"
 
 echo -e "${GREEN}=== Build Complete ===${NC}"
 echo -e "App bundle created at: ${YELLOW}$APP_BUNDLE${NC}"
