@@ -7,6 +7,14 @@ struct ContentView: View {
     @State private var modelsLoaded = false
     @State private var isLoading = false
     @State private var statusMessage = "Select model directory to begin"
+    @StateObject private var logManager = LogManager.shared
+    @StateObject private var historyManager = HistoryManager.shared
+
+    // For reusing prompts from history
+    @State private var promptToUse: String = ""
+    @State private var widthToUse: Double = 512
+    @State private var heightToUse: Double = 512
+    @State private var stepsToUse: Double = 8
 
     var body: some View {
         VStack(spacing: 0) {
@@ -15,11 +23,17 @@ struct ContentView: View {
                 TabButton(title: "Image", icon: "photo", isSelected: selectedTab == 0) {
                     selectedTab = 0
                 }
-                TabButton(title: "Chat", icon: "bubble.left", isSelected: selectedTab == 1) {
+                TabButton(title: "History", icon: "clock.arrow.circlepath", isSelected: selectedTab == 1) {
                     selectedTab = 1
                 }
-                TabButton(title: "Settings", icon: "gear", isSelected: selectedTab == 2) {
+                TabButton(title: "Chat", icon: "bubble.left", isSelected: selectedTab == 2) {
                     selectedTab = 2
+                }
+                TabButton(title: "Settings", icon: "gear", isSelected: selectedTab == 3) {
+                    selectedTab = 3
+                }
+                TabButton(title: "Logs", icon: "terminal", isSelected: selectedTab == 4) {
+                    selectedTab = 4
                 }
             }
             .padding(.horizontal)
@@ -36,17 +50,35 @@ struct ContentView: View {
                         modelDirectory: $modelDirectory,
                         modelsLoaded: $modelsLoaded,
                         isLoading: $isLoading,
-                        statusMessage: $statusMessage
+                        statusMessage: $statusMessage,
+                        logManager: logManager,
+                        historyManager: historyManager,
+                        promptToUse: $promptToUse,
+                        widthToUse: $widthToUse,
+                        heightToUse: $heightToUse,
+                        stepsToUse: $stepsToUse
                     )
                 case 1:
-                    ChatView(modelDirectory: $modelDirectory)
+                    HistoryView(
+                        historyManager: historyManager,
+                        selectedTab: $selectedTab,
+                        promptToUse: $promptToUse,
+                        widthToUse: $widthToUse,
+                        heightToUse: $heightToUse,
+                        stepsToUse: $stepsToUse
+                    )
                 case 2:
+                    ChatView(modelDirectory: $modelDirectory)
+                case 3:
                     SettingsView(
                         modelDirectory: $modelDirectory,
                         modelsLoaded: $modelsLoaded,
                         isLoading: $isLoading,
-                        statusMessage: $statusMessage
+                        statusMessage: $statusMessage,
+                        logManager: logManager
                     )
+                case 4:
+                    LogView(logManager: logManager)
                 default:
                     Text("Unknown tab")
                 }
@@ -54,6 +86,411 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 900, minHeight: 700)
+        .onAppear {
+            logManager.log("Z-Image App started")
+            logManager.log("Initialize GPU device...")
+            z_image_init()
+            logManager.log("GPU device initialized")
+            historyManager.loadHistory()
+            logManager.log("Loaded \(historyManager.items.count) history items")
+        }
+    }
+}
+
+// MARK: - Log Manager
+
+class LogManager: ObservableObject {
+    static let shared = LogManager()
+
+    @Published var logs: [LogEntry] = []
+
+    struct LogEntry: Identifiable {
+        let id = UUID()
+        let timestamp: Date
+        let message: String
+    }
+
+    func log(_ message: String) {
+        DispatchQueue.main.async {
+            let entry = LogEntry(timestamp: Date(), message: message)
+            self.logs.append(entry)
+            // Keep only last 500 entries
+            if self.logs.count > 500 {
+                self.logs.removeFirst(self.logs.count - 500)
+            }
+        }
+    }
+
+    func clear() {
+        DispatchQueue.main.async {
+            self.logs.removeAll()
+        }
+    }
+}
+
+// MARK: - History Manager
+
+struct HistoryItem: Identifiable, Codable, Hashable {
+    let id: String
+    let prompt: String
+    let width: Int
+    let height: Int
+    let steps: Int?  // Optional for backwards compatibility with egui history
+    let timestamp: Double  // Seconds since reference date (for egui compatibility)
+    let imagePath: String
+    let generationTime: Double
+
+    var date: Date {
+        Date(timeIntervalSinceReferenceDate: timestamp)
+    }
+
+    init(prompt: String, width: Int, height: Int, steps: Int, imagePath: String, generationTime: Double) {
+        self.id = UUID().uuidString
+        self.prompt = prompt
+        self.width = width
+        self.height = height
+        self.steps = steps
+        self.timestamp = Date().timeIntervalSinceReferenceDate
+        self.imagePath = imagePath
+        self.generationTime = generationTime
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+
+    static func == (lhs: HistoryItem, rhs: HistoryItem) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
+class HistoryManager: ObservableObject {
+    static let shared = HistoryManager()
+
+    @Published var items: [HistoryItem] = []
+
+    private var appDir: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupport.appendingPathComponent("ZImageApp", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private var historyDir: URL {
+        let dir = appDir.appendingPathComponent("history", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private var historyFile: URL {
+        appDir.appendingPathComponent("history.json")
+    }
+
+    func loadHistory() {
+        DispatchQueue.global(qos: .background).async {
+            var loadedItems: [HistoryItem] = []
+
+            // Load from single history.json file (egui format)
+            if let data = try? Data(contentsOf: self.historyFile),
+               let items = try? JSONDecoder().decode([HistoryItem].self, from: data) {
+                for item in items {
+                    // Check if image still exists
+                    if FileManager.default.fileExists(atPath: item.imagePath) {
+                        loadedItems.append(item)
+                    }
+                }
+            }
+
+            // Sort by timestamp, newest first
+            loadedItems.sort { $0.timestamp > $1.timestamp }
+
+            DispatchQueue.main.async {
+                self.items = loadedItems
+            }
+        }
+    }
+
+    private func saveHistory() {
+        DispatchQueue.global(qos: .background).async {
+            if let data = try? JSONEncoder().encode(self.items) {
+                try? data.write(to: self.historyFile)
+            }
+        }
+    }
+
+    func addItem(prompt: String, width: Int, height: Int, steps: Int, tempImagePath: String, generationTime: Double) {
+        let id = UUID().uuidString
+        let imagePath = historyDir.appendingPathComponent("\(id).png")
+
+        // Copy image to history
+        do {
+            try FileManager.default.copyItem(atPath: tempImagePath, toPath: imagePath.path)
+        } catch {
+            print("Failed to copy image to history: \(error)")
+            return
+        }
+
+        let item = HistoryItem(
+            prompt: prompt,
+            width: width,
+            height: height,
+            steps: steps,
+            imagePath: imagePath.path,
+            generationTime: generationTime
+        )
+
+        DispatchQueue.main.async {
+            self.items.insert(item, at: 0)
+            self.saveHistory()
+        }
+    }
+
+    func deleteItem(_ item: HistoryItem) {
+        // Delete image file
+        try? FileManager.default.removeItem(atPath: item.imagePath)
+
+        DispatchQueue.main.async {
+            self.items.removeAll { $0.id == item.id }
+            self.saveHistory()
+        }
+    }
+}
+
+// MARK: - History View
+
+struct HistoryView: View {
+    @ObservedObject var historyManager: HistoryManager
+    @Binding var selectedTab: Int
+    @Binding var promptToUse: String
+    @Binding var widthToUse: Double
+    @Binding var heightToUse: Double
+    @Binding var stepsToUse: Double
+
+    @State private var selectedItem: HistoryItem?
+
+    private let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .medium
+        return formatter
+    }()
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Left: List of history items
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Image(systemName: "clock.arrow.circlepath")
+                    Text("History")
+                        .font(.headline)
+                    Spacer()
+                    Text("\(historyManager.items.count) images")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding()
+
+                Divider()
+
+                if historyManager.items.isEmpty {
+                    VStack {
+                        Spacer()
+                        Text("No images generated yet")
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                } else {
+                    List(historyManager.items, selection: $selectedItem) { item in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.prompt)
+                                .lineLimit(2)
+                                .font(.body)
+                            HStack {
+                                Text("\(item.width)x\(item.height)")
+                                if let steps = item.steps {
+                                    Text("•")
+                                    Text("\(steps) steps")
+                                }
+                                Text("•")
+                                Text(dateFormatter.string(from: item.date))
+                            }
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedItem = item
+                        }
+                    }
+                }
+            }
+            .frame(width: 300)
+            .background(Color(NSColor.windowBackgroundColor))
+
+            Divider()
+
+            // Right: Selected item details
+            if let item = selectedItem {
+                VStack(spacing: 16) {
+                    // Image preview
+                    if let image = NSImage(contentsOfFile: item.imagePath) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxHeight: 400)
+                            .cornerRadius(8)
+                    }
+
+                    // Details
+                    GroupBox("Details") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            LabeledContent("Prompt") {
+                                Text(item.prompt)
+                                    .textSelection(.enabled)
+                            }
+                            LabeledContent("Size") {
+                                Text("\(item.width) x \(item.height)")
+                            }
+                            if let steps = item.steps {
+                                LabeledContent("Steps") {
+                                    Text("\(steps)")
+                                }
+                            }
+                            LabeledContent("Generated") {
+                                Text(dateFormatter.string(from: item.date))
+                            }
+                            LabeledContent("Time") {
+                                Text(String(format: "%.1f seconds", item.generationTime))
+                            }
+                        }
+                        .padding(8)
+                    }
+
+                    // Actions
+                    HStack {
+                        Button("Use This Prompt") {
+                            promptToUse = item.prompt
+                            widthToUse = Double(item.width)
+                            heightToUse = Double(item.height)
+                            stepsToUse = Double(item.steps ?? 8)
+                            selectedTab = 0 // Switch to Image tab
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("Open in Finder") {
+                            NSWorkspace.shared.selectFile(item.imagePath, inFileViewerRootedAtPath: "")
+                        }
+
+                        Button("Delete", role: .destructive) {
+                            historyManager.deleteItem(item)
+                            selectedItem = nil
+                        }
+                    }
+
+                    Spacer()
+                }
+                .padding()
+                .frame(maxWidth: .infinity)
+            } else {
+                VStack {
+                    Spacer()
+                    Text("Select an image from the list")
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+    }
+}
+
+// MARK: - Log View
+
+struct LogView: View {
+    @ObservedObject var logManager: LogManager
+    @State private var autoScroll = true
+
+    private let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Toolbar
+            HStack {
+                Image(systemName: "terminal")
+                    .font(.title2)
+                Text("Logs")
+                    .font(.headline)
+
+                Spacer()
+
+                Toggle("Auto-scroll", isOn: $autoScroll)
+                    .toggleStyle(.checkbox)
+
+                Button("Clear") {
+                    logManager.clear()
+                }
+
+                Button("Copy All") {
+                    let text = logManager.logs.map { "[\(dateFormatter.string(from: $0.timestamp))] \($0.message)" }.joined(separator: "\n")
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+            }
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
+
+            Divider()
+
+            // Log content
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(logManager.logs) { entry in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text("[\(dateFormatter.string(from: entry.timestamp))]")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                Text(entry.message)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundColor(colorForMessage(entry.message))
+                                    .textSelection(.enabled)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 1)
+                            .id(entry.id)
+                        }
+                    }
+                    .padding(.vertical, 8)
+                }
+                .background(Color(NSColor.textBackgroundColor))
+                .onChange(of: logManager.logs.count) { _ in
+                    if autoScroll, let lastId = logManager.logs.last?.id {
+                        withAnimation {
+                            proxy.scrollTo(lastId, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func colorForMessage(_ message: String) -> Color {
+        if message.contains("Error") || message.contains("error") || message.contains("failed") {
+            return .red
+        } else if message.contains("Warning") || message.contains("warning") {
+            return .orange
+        } else if message.contains("SUCCESS") || message.contains("complete") || message.contains("loaded") {
+            return .green
+        } else if message.starts(with: "[z-image]") || message.starts(with: "[qwen3]") {
+            return .cyan
+        }
+        return .primary
     }
 }
 
@@ -89,6 +526,14 @@ struct ImageGenerationView: View {
     @Binding var modelsLoaded: Bool
     @Binding var isLoading: Bool
     @Binding var statusMessage: String
+    @ObservedObject var logManager: LogManager
+    @ObservedObject var historyManager: HistoryManager
+
+    // For reusing prompts from history
+    @Binding var promptToUse: String
+    @Binding var widthToUse: Double
+    @Binding var heightToUse: Double
+    @Binding var stepsToUse: Double
 
     @State private var prompt = ""
     @State private var width: Double = 512
@@ -100,15 +545,15 @@ struct ImageGenerationView: View {
     @State private var isGenerating = false
 
     // Memory settings
-    @State private var selectedPreset: VRAMPreset = .high
+    @State private var selectedPreset: VRAMPreset = .fast
     @State private var attentionSliceSize: Double = 0
     @State private var lowMemoryMode = false
 
     var body: some View {
-        HSplitView {
-            // Left panel - Controls
+        HStack(spacing: 0) {
+            // Left panel - Controls (fixed width)
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 12) {
                     // Model status
                     HStack {
                         Circle()
@@ -130,141 +575,111 @@ struct ImageGenerationView: View {
                         Text("Prompt")
                             .font(.headline)
                         TextEditor(text: $prompt)
-                            .frame(height: 80)
+                            .frame(height: 70)
                             .font(.body)
                             .padding(4)
                             .background(Color(NSColor.textBackgroundColor))
                             .cornerRadius(8)
                     }
 
-                    // Size controls
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Image Size")
-                            .font(.headline)
-
-                        HStack {
-                            Text("Width:")
-                            Slider(value: $width, in: 256...1024, step: 64)
-                            Text("\(Int(width))")
-                                .frame(width: 50)
+                    // Size controls - more compact
+                    GroupBox("Image Size") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("W:")
+                                    .frame(width: 20)
+                                Slider(value: $width, in: 256...1024, step: 64)
+                                Text("\(Int(width))")
+                                    .frame(width: 40)
+                                    .monospacedDigit()
+                            }
+                            HStack {
+                                Text("H:")
+                                    .frame(width: 20)
+                                Slider(value: $height, in: 256...1024, step: 64)
+                                Text("\(Int(height))")
+                                    .frame(width: 40)
+                                    .monospacedDigit()
+                            }
+                            HStack(spacing: 4) {
+                                Button("256") { width = 256; height = 256 }
+                                Button("512") { width = 512; height = 512 }
+                                Button("768") { width = 768; height = 768 }
+                                Button("1024") { width = 1024; height = 1024 }
+                            }
+                            .font(.caption)
+                            .buttonStyle(.bordered)
                         }
-
-                        HStack {
-                            Text("Height:")
-                            Slider(value: $height, in: 256...1024, step: 64)
-                            Text("\(Int(height))")
-                                .frame(width: 50)
-                        }
-
-                        // Size presets
-                        HStack {
-                            Text("Presets:")
-                                .font(.caption)
-                            Button("256") { width = 256; height = 256 }
-                            Button("512") { width = 512; height = 512 }
-                            Button("768") { width = 768; height = 768 }
-                            Button("1024") { width = 1024; height = 1024 }
-                        }
-                        .font(.caption)
+                        .padding(4)
                     }
 
-                    // Generation settings - Always visible
-                    GroupBox("Generation Options") {
-                        VStack(alignment: .leading, spacing: 10) {
+                    // Generation settings - compact
+                    GroupBox("Generation") {
+                        VStack(alignment: .leading, spacing: 6) {
                             HStack {
-                                Text("Inference Steps:")
+                                Text("Steps:")
                                 Slider(value: $numSteps, in: 4...20, step: 1)
                                 Text("\(Int(numSteps))")
-                                    .frame(width: 30)
+                                    .frame(width: 25)
                                     .monospacedDigit()
                             }
-                            Text("Z-Image Turbo is optimized for 4-8 steps")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-
-                            Divider()
 
                             HStack {
-                                Toggle("Fixed Seed:", isOn: $useSeed)
+                                Toggle("Seed:", isOn: $useSeed)
                                     .toggleStyle(.checkbox)
-                                TextField("Seed", text: $seed)
+                                TextField("", text: $seed)
                                     .textFieldStyle(.roundedBorder)
-                                    .frame(width: 100)
+                                    .frame(width: 80)
                                     .disabled(!useSeed)
                                 if useSeed {
-                                    Button("Random") {
+                                    Button("Rand") {
                                         seed = String(UInt64.random(in: 1...UInt64.max))
                                     }
+                                    .font(.caption)
                                 }
                             }
                         }
-                        .padding(8)
+                        .padding(4)
                     }
 
-                    // Memory optimization - Always visible
-                    GroupBox("Memory Optimization") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            // VRAM Presets
-                            Text("VRAM Preset")
-                                .font(.subheadline)
-                            Picker("", selection: $selectedPreset) {
+                    // Memory optimization - compact
+                    GroupBox("Memory") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            // VRAM Presets as buttons
+                            HStack(spacing: 4) {
                                 ForEach(VRAMPreset.allCases, id: \.self) { preset in
-                                    Text(preset.rawValue).tag(preset)
+                                    Button(preset.shortName) {
+                                        selectedPreset = preset
+                                        applyPreset(preset)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .tint(selectedPreset == preset ? .accentColor : .secondary)
                                 }
                             }
-                            .pickerStyle(.segmented)
-                            .onChange(of: selectedPreset) { newValue in
-                                applyPreset(newValue)
-                            }
+                            .font(.caption)
 
-                            Divider()
-
-                            // Attention slicing
                             HStack {
-                                Text("Attention Slicing:")
+                                Text("Slice:")
                                 Slider(value: $attentionSliceSize, in: 0...30, step: 1)
                                 Text("\(Int(attentionSliceSize))")
-                                    .frame(width: 30)
+                                    .frame(width: 25)
                                     .monospacedDigit()
                             }
-                            Text(attentionSliceDescription)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
 
-                            // Low memory mode
-                            Toggle("Low Memory Mode (saves ~7.5GB VRAM)", isOn: $lowMemoryMode)
+                            Toggle("Low Mem Mode", isOn: $lowMemoryMode)
                                 .toggleStyle(.checkbox)
                                 .onChange(of: lowMemoryMode) { newValue in
                                     ZImageBridge.shared.setLowMemoryMode(newValue)
                                 }
 
-                            // Status indicator
                             if attentionSliceSize > 0 || lowMemoryMode {
-                                HStack {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(.orange)
-                                    Text("Memory optimization active")
-                                        .font(.caption)
-                                        .foregroundColor(.orange)
-                                }
-                            }
-
-                            Divider()
-
-                            // Memory usage estimate
-                            HStack {
-                                Text("Estimated VRAM:")
-                                    .font(.caption)
-                                Text(estimatedMemoryUsage)
+                                Text("~\(estimatedMemoryUsage)")
                                     .font(.caption)
                                     .foregroundColor(.orange)
-                                    .bold()
                             }
                         }
-                        .padding(8)
+                        .padding(4)
                     }
-
-                    Spacer()
 
                     // Generate button
                     Button(action: generateImage) {
@@ -276,7 +691,7 @@ struct ImageGenerationView: View {
                             Text(isGenerating ? "Generating..." : "Generate Image")
                         }
                         .frame(maxWidth: .infinity)
-                        .padding()
+                        .padding(8)
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(!modelsLoaded || isGenerating || prompt.isEmpty)
@@ -285,10 +700,12 @@ struct ImageGenerationView: View {
                     Text(statusMessage)
                         .font(.caption)
                         .foregroundColor(.secondary)
+                        .lineLimit(2)
                 }
-                .padding()
+                .padding(12)
             }
-            .frame(minWidth: 320, maxWidth: 420)
+            .frame(width: 340)
+            .background(Color(NSColor.windowBackgroundColor))
 
             // Right panel - Image preview
             VStack {
@@ -316,6 +733,17 @@ struct ImageGenerationView: View {
             }
             .frame(minWidth: 400)
         }
+        .onChange(of: promptToUse) { newValue in
+            // Apply prompt from history when user clicks "Use This Prompt"
+            if !newValue.isEmpty {
+                prompt = newValue
+                width = widthToUse
+                height = heightToUse
+                numSteps = stepsToUse
+                // Clear the binding so we can detect future changes
+                promptToUse = ""
+            }
+        }
     }
 
     private var attentionSliceDescription: String {
@@ -329,23 +757,36 @@ struct ImageGenerationView: View {
     }
 
     private var estimatedMemoryUsage: String {
-        let baseMemory: Double
+        // Base: models need ~20GB loaded (transformer 12GB + text encoder 8GB)
+        // Low memory mode unloads text encoder during diffusion, reducing to ~12GB
+        // Attention slicing reduces peak memory spikes during attention computation
+
+        let modelMemory: Double = lowMemoryMode ? 12.0 : 20.0
+
+        // Peak memory during generation depends on resolution
+        let peakExtra: Double
         switch Int(width) {
-        case 256: baseMemory = 12
-        case 512: baseMemory = 20
-        case 768: baseMemory = 28
-        default: baseMemory = 40
+        case 256: peakExtra = lowMemoryMode ? 2.0 : 4.0
+        case 512: peakExtra = lowMemoryMode ? 4.0 : 8.0
+        case 768: peakExtra = lowMemoryMode ? 6.0 : 12.0
+        default: peakExtra = lowMemoryMode ? 8.0 : 16.0
         }
 
-        var adjusted = baseMemory
+        // Attention slicing reduces peak extra
+        var adjustedPeak = peakExtra
         if attentionSliceSize >= 4 {
-            adjusted *= 0.75
-        }
-        if lowMemoryMode {
-            adjusted -= 7.5
+            adjustedPeak *= 0.6
+        } else if attentionSliceSize >= 2 {
+            adjustedPeak *= 0.7
         }
 
-        return String(format: "~%.0f GB for %dx%d", max(adjusted, 6), Int(width), Int(height))
+        let total = modelMemory + adjustedPeak
+
+        if lowMemoryMode {
+            return String(format: "Peak ~%.0fGB (models unload to %.0fGB)", total, modelMemory)
+        } else {
+            return String(format: "Peak ~%.0fGB", total)
+        }
     }
 
     private func applyPreset(_ preset: VRAMPreset) {
@@ -357,6 +798,7 @@ struct ImageGenerationView: View {
     private func loadModels() {
         isLoading = true
         statusMessage = "Loading models..."
+        logManager.log("[z-image] Loading models from \(modelDirectory)...")
 
         DispatchQueue.global(qos: .userInitiated).async {
             let success = ZImageBridge.shared.loadImageModels(modelDir: modelDirectory)
@@ -364,7 +806,14 @@ struct ImageGenerationView: View {
             DispatchQueue.main.async {
                 isLoading = false
                 modelsLoaded = success
-                statusMessage = success ? "Models loaded successfully" : "Failed to load models: \(ZImageBridge.shared.lastError ?? "Unknown error")"
+                if success {
+                    statusMessage = "Models loaded successfully"
+                    logManager.log("[z-image] Models loaded successfully")
+                } else {
+                    let error = ZImageBridge.shared.lastError ?? "Unknown error"
+                    statusMessage = "Failed to load models: \(error)"
+                    logManager.log("[z-image] Error: Failed to load models: \(error)")
+                }
             }
         }
     }
@@ -378,15 +827,24 @@ struct ImageGenerationView: View {
         ZImageBridge.shared.setAttentionSliceSize(Int32(attentionSliceSize))
         ZImageBridge.shared.setLowMemoryMode(lowMemoryMode)
 
+        logManager.log("[z-image] Starting generation...")
+        logManager.log("[z-image] Prompt: \"\(prompt)\"")
+        logManager.log("[z-image] Size: \(Int(width))x\(Int(height)), Steps: \(Int(numSteps))")
+        logManager.log("[z-image] Memory: slice_size=\(Int(attentionSliceSize)), low_memory=\(lowMemoryMode)")
+
         if useSeed, let seedValue = UInt64(seed) {
             ZImageBridge.shared.setSeed(seedValue)
+            logManager.log("[z-image] Using fixed seed: \(seedValue)")
         } else {
             ZImageBridge.shared.setSeed(0)
+            logManager.log("[z-image] Using random seed")
         }
 
         let tempPath = FileManager.default.temporaryDirectory
             .appendingPathComponent("z_image_\(UUID().uuidString).png")
             .path
+
+        let startTime = Date()
 
         DispatchQueue.global(qos: .userInitiated).async {
             let success = ZImageBridge.shared.generateImage(
@@ -399,16 +857,33 @@ struct ImageGenerationView: View {
 
             DispatchQueue.main.async {
                 isGenerating = false
+                let elapsed = Date().timeIntervalSince(startTime)
 
                 if success {
                     if let image = NSImage(contentsOfFile: tempPath) {
                         generatedImage = image
                         statusMessage = "Image generated successfully"
+                        logManager.log("[z-image] Generation complete in \(String(format: "%.1f", elapsed))s")
+                        logManager.log("[z-image] Saved to: \(tempPath)")
+
+                        // Save to history
+                        historyManager.addItem(
+                            prompt: prompt,
+                            width: Int(width),
+                            height: Int(height),
+                            steps: Int(numSteps),
+                            tempImagePath: tempPath,
+                            generationTime: elapsed
+                        )
+                        logManager.log("[z-image] Added to history")
                     } else {
                         statusMessage = "Failed to load generated image"
+                        logManager.log("[z-image] Error: Failed to load generated image from \(tempPath)")
                     }
                 } else {
-                    statusMessage = "Generation failed: \(ZImageBridge.shared.lastError ?? "Unknown error")"
+                    let error = ZImageBridge.shared.lastError ?? "Unknown error"
+                    statusMessage = "Generation failed: \(error)"
+                    logManager.log("[z-image] Error: Generation failed: \(error)")
                 }
             }
         }
@@ -575,6 +1050,7 @@ struct SettingsView: View {
     @Binding var modelsLoaded: Bool
     @Binding var isLoading: Bool
     @Binding var statusMessage: String
+    @ObservedObject var logManager: LogManager
 
     @State private var attentionSliceSize: Int32 = 0
     @State private var lowMemoryMode = false
@@ -763,6 +1239,7 @@ struct SettingsView: View {
     private func loadModels() {
         isLoading = true
         statusMessage = "Loading models..."
+        logManager.log("[z-image] Loading models from \(modelDirectory)...")
 
         DispatchQueue.global(qos: .userInitiated).async {
             let success = ZImageBridge.shared.loadImageModels(modelDir: modelDirectory)
@@ -770,13 +1247,21 @@ struct SettingsView: View {
             DispatchQueue.main.async {
                 isLoading = false
                 modelsLoaded = success
-                statusMessage = success ? "Models loaded" : "Failed to load models"
+                if success {
+                    statusMessage = "Models loaded"
+                    logManager.log("[z-image] Models loaded successfully")
+                } else {
+                    statusMessage = "Failed to load models"
+                    logManager.log("[z-image] Error: Failed to load models")
+                }
             }
         }
     }
 
     private func unloadModels() {
+        logManager.log("[z-image] Unloading models...")
         _ = ZImageBridge.shared.unloadImageModels()
+        logManager.log("[z-image] Models unloaded")
         modelsLoaded = false
         statusMessage = "Models unloaded"
     }

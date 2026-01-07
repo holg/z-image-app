@@ -5,13 +5,27 @@
 
 use std::path::PathBuf;
 
+// Backend imports based on feature flags
+#[cfg(any(feature = "cuda", feature = "metal"))]
 use burn::backend::candle::{Candle, CandleDevice};
+#[cfg(feature = "native-cuda")]
+use burn::backend::{Cuda, cuda::CudaDevice};
+#[cfg(any(feature = "vulkan", feature = "wgpu", feature = "wgpu-metal"))]
+use burn::backend::{Wgpu, wgpu::WgpuDevice};
+
 use burn::module::Module;
+#[cfg(any(feature = "cuda", feature = "metal"))]
 use half::bf16;
 use qwen3_burn::{Qwen3Config, Qwen3Model, Qwen3Tokenizer};
 use z_image::{GenerateFromTextOpts, modules::ae::AutoEncoderConfig, modules::transformer::ZImageModelConfig};
 
+// Backend type based on feature flags
+#[cfg(any(feature = "cuda", feature = "metal"))]
 type Backend = Candle<bf16, i64>;
+#[cfg(feature = "native-cuda")]
+type Backend = Cuda<f32, i32>;
+#[cfg(any(feature = "vulkan", feature = "wgpu", feature = "wgpu-metal"))]
+type Backend = Wgpu;
 
 struct Args {
     model_dir: PathBuf,
@@ -107,8 +121,27 @@ fn main() {
     eprintln!("Output: {:?}", args.output_path);
     eprintln!("Size: {}x{}", args.width, args.height);
 
-    let device = CandleDevice::metal(0);
-    eprintln!("Using Metal device");
+    // Device selection based on backend
+    #[cfg(feature = "metal")]
+    let device = {
+        eprintln!("Using Metal device");
+        CandleDevice::metal(0)
+    };
+    #[cfg(feature = "cuda")]
+    let device = {
+        eprintln!("Using CUDA device (Candle)");
+        CandleDevice::cuda(0)
+    };
+    #[cfg(feature = "native-cuda")]
+    let device = {
+        eprintln!("Using CUDA device (native)");
+        CudaDevice::new(0)
+    };
+    #[cfg(any(feature = "vulkan", feature = "wgpu", feature = "wgpu-metal"))]
+    let device = {
+        eprintln!("Using WGPU device");
+        WgpuDevice::default()
+    };
 
     // Load tokenizer
     let tokenizer_path = args.model_dir.join("qwen3-tokenizer.json");
@@ -122,10 +155,11 @@ fn main() {
     };
     eprintln!("Tokenizer loaded");
 
-    // Load text encoder
+    // Load text encoder - use Q8 version if available
+    let te_q8 = args.model_dir.join("qwen3_4b_text_encoder_q8.bpk");
     let te_bpk = args.model_dir.join("qwen3_4b_text_encoder.bpk");
     let te_safetensors = args.model_dir.join("qwen3_4b_text_encoder.safetensors");
-    let te_path = if te_bpk.exists() { te_bpk } else { te_safetensors };
+    let te_path = if te_q8.exists() { te_q8 } else if te_bpk.exists() { te_bpk } else { te_safetensors };
     eprintln!("Loading text encoder from {:?}...", te_path);
     let mut text_encoder: Qwen3Model<Backend> = Qwen3Config::z_image_text_encoder().init(&device);
     if let Err(e) = text_encoder.load_weights(&te_path) {
@@ -134,8 +168,10 @@ fn main() {
     }
     eprintln!("Text encoder loaded");
 
-    // Load transformer
-    let transformer_path = args.model_dir.join("z_image_turbo_bf16.bpk");
+    // Load transformer - use Q8 version if available
+    let transformer_q8 = args.model_dir.join("z_image_turbo_q8.bpk");
+    let transformer_bf16 = args.model_dir.join("z_image_turbo_bf16.bpk");
+    let transformer_path = if transformer_q8.exists() { transformer_q8 } else { transformer_bf16 };
     eprintln!("Loading transformer from {:?}...", transformer_path);
     let mut transformer: z_image::modules::transformer::ZImageModel<Backend> = ZImageModelConfig::default().init(&device);
     if let Err(e) = transformer.load_weights(&transformer_path) {

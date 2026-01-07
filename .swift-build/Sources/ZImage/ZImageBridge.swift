@@ -94,26 +94,22 @@ class ZImageBridge {
 
     /// Apply high VRAM preset (24GB+)
     func applyHighVRAMPreset() {
-        z_image_set_attention_slice_size(0)
-        z_image_set_low_memory_mode(0)
+        z_image_preset_high_vram()
     }
 
     /// Apply medium VRAM preset (16GB)
     func applyMediumVRAMPreset() {
-        z_image_set_attention_slice_size(8)
-        z_image_set_low_memory_mode(0)
+        z_image_preset_medium_vram()
     }
 
     /// Apply low VRAM preset (12GB)
     func applyLowVRAMPreset() {
-        z_image_set_attention_slice_size(4)
-        z_image_set_low_memory_mode(1)
+        z_image_preset_low_vram()
     }
 
     /// Apply very low VRAM preset (8GB)
     func applyVeryLowVRAMPreset() {
-        z_image_set_attention_slice_size(2)
-        z_image_set_low_memory_mode(1)
+        z_image_preset_very_low_vram()
     }
 
     // MARK: - Text Chat (Qwen3-0.6B)
@@ -159,42 +155,33 @@ class ZImageBridge {
 // MARK: - Memory Preset Enum
 
 enum VRAMPreset: String, CaseIterable {
-    case fast = "Fast (no optimization)"
-    case balanced = "Balanced"
-    case lowPeak = "Lower Peak"
-    case minPeak = "Minimum Peak"
-
-    var shortName: String {
-        switch self {
-        case .fast: return "Fast"
-        case .balanced: return "Balanced"
-        case .lowPeak: return "Low Peak"
-        case .minPeak: return "Min Peak"
-        }
-    }
+    case high = "High (24GB+)"
+    case medium = "Medium (16GB)"
+    case low = "Low (12GB)"
+    case veryLow = "Very Low (8GB)"
 
     var attentionSliceSize: Int32 {
         switch self {
-        case .fast: return 0
-        case .balanced: return 8
-        case .lowPeak: return 4
-        case .minPeak: return 2
+        case .high: return 0
+        case .medium: return 8
+        case .low: return 4
+        case .veryLow: return 2
         }
     }
 
     var lowMemoryMode: Bool {
         switch self {
-        case .fast, .balanced: return false
-        case .lowPeak, .minPeak: return true
+        case .high, .medium: return false
+        case .low, .veryLow: return true
         }
     }
 
     func apply() {
         switch self {
-        case .fast: ZImageBridge.shared.applyHighVRAMPreset()
-        case .balanced: ZImageBridge.shared.applyMediumVRAMPreset()
-        case .lowPeak: ZImageBridge.shared.applyLowVRAMPreset()
-        case .minPeak: ZImageBridge.shared.applyVeryLowVRAMPreset()
+        case .high: ZImageBridge.shared.applyHighVRAMPreset()
+        case .medium: ZImageBridge.shared.applyMediumVRAMPreset()
+        case .low: ZImageBridge.shared.applyLowVRAMPreset()
+        case .veryLow: ZImageBridge.shared.applyVeryLowVRAMPreset()
         }
     }
 }

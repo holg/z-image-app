@@ -17,7 +17,7 @@ libc = "0.2"
 # egui dependencies (optional, for cross-platform GUI)
 eframe = { version = "0.30", optional = true, default-features = false, features = ["default_fonts", "glow", "persistence"] }
 egui_extras = { version = "0.30", optional = true, features = ["image"] }
-image = { version = "0.25", optional = true }
+image = "0.25"
 rfd = { version = "0.15", optional = true }
 reqwest = { version = "0.12", optional = true, features = ["blocking"] }
 directories = { version = "5.0", optional = true }
@@ -28,7 +28,7 @@ rand = { version = "0.9", optional = true }
 
 [features]
 default = ["metal"]
-egui = ["dep:eframe", "dep:egui_extras", "dep:image", "dep:rfd", "dep:reqwest", "dep:directories", "dep:chrono", "dep:serde_json", "dep:open", "dep:rand"]
+egui = ["dep:eframe", "dep:egui_extras", "dep:rfd", "dep:reqwest", "dep:directories", "dep:chrono", "dep:serde_json", "dep:open", "dep:rand"]
 
 # Backend features - choose ONE when building
 # macOS (Metal via Candle): cargo build --release --features metal
@@ -39,12 +39,25 @@ egui = ["dep:eframe", "dep:egui_extras", "dep:image", "dep:rfd", "dep:reqwest", 
 metal = ["burn/candle", "burn/candle-metal"]
 wgpu-metal = ["burn/wgpu", "burn/metal"]
 cuda = ["burn/candle", "burn/candle-cuda"]
+native-cuda = ["burn/cuda"]
 vulkan = ["burn/wgpu", "burn/vulkan"]
 wgpu = ["burn/wgpu"]
 cpu = ["burn/ndarray"]
 
 [build-dependencies]
 cbindgen = "0.27"
+
+# Release profile optimizations
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Also optimize dependencies in dev builds for faster iteration
+[profile.dev.package."*"]
+opt-level = 2
 
 [[bin]]
 name = "test_generate"
@@ -78,3 +91,20 @@ required-features = ["egui"]
 [[bin]]
 name = "convert_models"
 path = "src/bin/convert_models.rs"
+
+[[bin]]
+name = "test_lowmem"
+path = "src/bin/test_lowmem.rs"
+
+[[bin]]
+name = "compute_embedding"
+path = "src/bin/compute_embedding.rs"
+
+[[bin]]
+name = "generate_from_embedding"
+path = "src/bin/generate_from_embedding.rs"
+
+[[bin]]
+name = "gui_lowmem"
+path = "src/bin/gui_lowmem.rs"
+required-features = ["egui"]

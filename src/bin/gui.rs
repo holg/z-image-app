@@ -727,10 +727,16 @@ impl ZImageApp {
 
         // Apply memory optimization settings
         z_image::set_attention_slice_size(self.attention_slice_size as usize);
+        // Note: low_memory_mode only works when models are NOT pre-loaded
+        // When models are cached, they all stay in GPU memory together
         self.log(&format!(
             "Memory settings: attention_slice_size={}, low_memory_mode={}",
             self.attention_slice_size, self.low_memory_mode
         ));
+        if self.low_memory_mode && self.image_models_loaded {
+            self.log("⚠ Low memory mode has no effect when models are pre-loaded!");
+            self.log("  Unload models first, then generate with low memory mode.");
+        }
 
         let tx = self.tx.clone();
         let device = self.device.clone().unwrap();
