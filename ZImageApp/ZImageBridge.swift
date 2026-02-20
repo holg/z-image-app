@@ -12,9 +12,15 @@ class ZImageBridge {
     // MARK: - Image Generation Models
 
     /// Load image generation models into GPU memory
-    func loadImageModels(modelDir: String) -> Bool {
+    /// Returns nil on success, or an error message on failure
+    func loadImageModels(modelDir: String) -> String? {
         let result = z_image_load_models(modelDir)
-        return result == 0
+        if result == 0 {
+            return nil // Success
+        } else {
+            // Get the error message
+            return lastError ?? "Unknown error loading models"
+        }
     }
 
     /// Unload image generation models from GPU memory

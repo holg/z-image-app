@@ -81,7 +81,13 @@ fn main() {
         stdout.flush().unwrap();
 
         let mut input = String::new();
-        stdin.lock().read_line(&mut input).unwrap();
+        let bytes_read = stdin.lock().read_line(&mut input).unwrap();
+
+        // EOF reached (e.g., piped input ended)
+        if bytes_read == 0 {
+            break;
+        }
+
         let input = input.trim();
 
         if input.is_empty() {

@@ -11,13 +11,62 @@ cd "$SCRIPT_DIR"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# Default backend
+BACKEND="${1:-candle-metal}"
+
+# Show usage
+show_usage() {
+    echo "Usage: $0 [BACKEND]"
+    echo ""
+    echo "Available backends:"
+    echo "  candle-metal   - Candle with Metal (default, stable)"
+    echo "  wgpu-metal     - WGPU with Metal (has flash attention, experimental)"
+    echo "  cpu            - CPU only (ndarray, slow but universal)"
+    echo ""
+    echo "Examples:"
+    echo "  $0                  # Build with candle-metal (default)"
+    echo "  $0 wgpu-metal       # Build with WGPU Metal + flash attention"
+    echo "  $0 cpu              # Build with CPU backend"
+}
+
+# Parse arguments
+case "$BACKEND" in
+    candle-metal|metal)
+        BACKEND="candle-metal"
+        CARGO_FEATURES="--features metal"
+        BACKEND_DESC="Candle + Metal (naive attention)"
+        ;;
+    wgpu-metal|wgpu)
+        BACKEND="wgpu-metal"
+        CARGO_FEATURES="--no-default-features --features wgpu-metal"
+        BACKEND_DESC="WGPU + Metal (flash attention)"
+        ;;
+    cpu|ndarray)
+        BACKEND="cpu"
+        CARGO_FEATURES="--no-default-features --features cpu"
+        BACKEND_DESC="CPU only (ndarray)"
+        ;;
+    -h|--help|help)
+        show_usage
+        exit 0
+        ;;
+    *)
+        echo -e "${RED}Unknown backend: $BACKEND${NC}"
+        show_usage
+        exit 1
+        ;;
+esac
+
 echo -e "${GREEN}=== Building Z-Image macOS App ===${NC}"
+echo -e "${CYAN}Backend: $BACKEND_DESC${NC}"
+echo ""
 
 # Step 1: Build the Rust library
 echo -e "${YELLOW}Building Rust library...${NC}"
-cargo build --release --lib
+cargo build --release --lib $CARGO_FEATURES
 
 # Check if library was built
 DYLIB_PATH="target/release/libz_image_ffi.dylib"

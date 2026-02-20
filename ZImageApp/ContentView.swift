@@ -3,18 +3,21 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var selectedTab = 0
-    @State private var modelDirectory: String = ""
+    @AppStorage("modelDirectory") private var modelDirectory: String = "/Volumes/tb3ssd/volume/burn_models"
     @State private var modelsLoaded = false
     @State private var isLoading = false
     @State private var statusMessage = "Select model directory to begin"
     @StateObject private var logManager = LogManager.shared
     @StateObject private var historyManager = HistoryManager.shared
 
-    // For reusing prompts from history
-    @State private var promptToUse: String = ""
-    @State private var widthToUse: Double = 512
-    @State private var heightToUse: Double = 512
-    @State private var stepsToUse: Double = 8
+    // Persistent state for Image tab (so it survives tab switches)
+    @State private var imagePrompt: String = ""
+    @State private var imageWidth: Double = 512
+    @State private var imageHeight: Double = 512
+    @State private var imageNumSteps: Double = 8
+    @State private var imageSeed: String = "0"
+    @State private var imageUseSeed: Bool = false
+    @State private var generatedImage: NSImage? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,17 +26,20 @@ struct ContentView: View {
                 TabButton(title: "Image", icon: "photo", isSelected: selectedTab == 0) {
                     selectedTab = 0
                 }
-                TabButton(title: "History", icon: "clock.arrow.circlepath", isSelected: selectedTab == 1) {
+                TabButton(title: "Video", icon: "film", isSelected: selectedTab == 1) {
                     selectedTab = 1
                 }
-                TabButton(title: "Chat", icon: "bubble.left", isSelected: selectedTab == 2) {
+                TabButton(title: "History", icon: "clock.arrow.circlepath", isSelected: selectedTab == 2) {
                     selectedTab = 2
                 }
-                TabButton(title: "Settings", icon: "gear", isSelected: selectedTab == 3) {
+                TabButton(title: "Chat", icon: "bubble.left", isSelected: selectedTab == 3) {
                     selectedTab = 3
                 }
-                TabButton(title: "Logs", icon: "terminal", isSelected: selectedTab == 4) {
+                TabButton(title: "Settings", icon: "gear", isSelected: selectedTab == 4) {
                     selectedTab = 4
+                }
+                TabButton(title: "Logs", icon: "terminal", isSelected: selectedTab == 5) {
+                    selectedTab = 5
                 }
             }
             .padding(.horizontal)
@@ -42,46 +48,62 @@ struct ContentView: View {
             Divider()
                 .padding(.top, 8)
 
-            // Content
-            Group {
-                switch selectedTab {
-                case 0:
-                    ImageGenerationView(
-                        modelDirectory: $modelDirectory,
-                        modelsLoaded: $modelsLoaded,
-                        isLoading: $isLoading,
-                        statusMessage: $statusMessage,
-                        logManager: logManager,
-                        historyManager: historyManager,
-                        promptToUse: $promptToUse,
-                        widthToUse: $widthToUse,
-                        heightToUse: $heightToUse,
-                        stepsToUse: $stepsToUse
-                    )
-                case 1:
-                    HistoryView(
-                        historyManager: historyManager,
-                        selectedTab: $selectedTab,
-                        promptToUse: $promptToUse,
-                        widthToUse: $widthToUse,
-                        heightToUse: $heightToUse,
-                        stepsToUse: $stepsToUse
-                    )
-                case 2:
-                    ChatView(modelDirectory: $modelDirectory)
-                case 3:
-                    SettingsView(
-                        modelDirectory: $modelDirectory,
-                        modelsLoaded: $modelsLoaded,
-                        isLoading: $isLoading,
-                        statusMessage: $statusMessage,
-                        logManager: logManager
-                    )
-                case 4:
-                    LogView(logManager: logManager)
-                default:
-                    Text("Unknown tab")
-                }
+            // Content - using ZStack to keep views alive
+            ZStack {
+                ImageGenerationView(
+                    modelDirectory: $modelDirectory,
+                    modelsLoaded: $modelsLoaded,
+                    isLoading: $isLoading,
+                    statusMessage: $statusMessage,
+                    logManager: logManager,
+                    historyManager: historyManager,
+                    prompt: $imagePrompt,
+                    width: $imageWidth,
+                    height: $imageHeight,
+                    numSteps: $imageNumSteps,
+                    seed: $imageSeed,
+                    useSeed: $imageUseSeed,
+                    generatedImage: $generatedImage
+                )
+                .opacity(selectedTab == 0 ? 1 : 0)
+                .allowsHitTesting(selectedTab == 0)
+
+                VideoGenerationView(
+                    modelDirectory: $modelDirectory,
+                    imageModelsLoaded: $modelsLoaded,
+                    logManager: logManager
+                )
+                .opacity(selectedTab == 1 ? 1 : 0)
+                .allowsHitTesting(selectedTab == 1)
+
+                HistoryView(
+                    historyManager: historyManager,
+                    selectedTab: $selectedTab,
+                    imagePrompt: $imagePrompt,
+                    imageWidth: $imageWidth,
+                    imageHeight: $imageHeight,
+                    imageNumSteps: $imageNumSteps
+                )
+                .opacity(selectedTab == 2 ? 1 : 0)
+                .allowsHitTesting(selectedTab == 2)
+
+                ChatView(modelDirectory: $modelDirectory)
+                    .opacity(selectedTab == 3 ? 1 : 0)
+                    .allowsHitTesting(selectedTab == 3)
+
+                SettingsView(
+                    modelDirectory: $modelDirectory,
+                    modelsLoaded: $modelsLoaded,
+                    isLoading: $isLoading,
+                    statusMessage: $statusMessage,
+                    logManager: logManager
+                )
+                .opacity(selectedTab == 4 ? 1 : 0)
+                .allowsHitTesting(selectedTab == 4)
+
+                LogView(logManager: logManager)
+                    .opacity(selectedTab == 5 ? 1 : 0)
+                    .allowsHitTesting(selectedTab == 5)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -261,10 +283,10 @@ class HistoryManager: ObservableObject {
 struct HistoryView: View {
     @ObservedObject var historyManager: HistoryManager
     @Binding var selectedTab: Int
-    @Binding var promptToUse: String
-    @Binding var widthToUse: Double
-    @Binding var heightToUse: Double
-    @Binding var stepsToUse: Double
+    @Binding var imagePrompt: String
+    @Binding var imageWidth: Double
+    @Binding var imageHeight: Double
+    @Binding var imageNumSteps: Double
 
     @State private var selectedItem: HistoryItem?
 
@@ -370,10 +392,10 @@ struct HistoryView: View {
                     // Actions
                     HStack {
                         Button("Use This Prompt") {
-                            promptToUse = item.prompt
-                            widthToUse = Double(item.width)
-                            heightToUse = Double(item.height)
-                            stepsToUse = Double(item.steps ?? 8)
+                            imagePrompt = item.prompt
+                            imageWidth = Double(item.width)
+                            imageHeight = Double(item.height)
+                            imageNumSteps = Double(item.steps ?? 8)
                             selectedTab = 0 // Switch to Image tab
                         }
                         .buttonStyle(.borderedProminent)
@@ -529,19 +551,15 @@ struct ImageGenerationView: View {
     @ObservedObject var logManager: LogManager
     @ObservedObject var historyManager: HistoryManager
 
-    // For reusing prompts from history
-    @Binding var promptToUse: String
-    @Binding var widthToUse: Double
-    @Binding var heightToUse: Double
-    @Binding var stepsToUse: Double
+    // Persistent state (passed from parent)
+    @Binding var prompt: String
+    @Binding var width: Double
+    @Binding var height: Double
+    @Binding var numSteps: Double
+    @Binding var seed: String
+    @Binding var useSeed: Bool
+    @Binding var generatedImage: NSImage?
 
-    @State private var prompt = ""
-    @State private var width: Double = 512
-    @State private var height: Double = 512
-    @State private var numSteps: Double = 8
-    @State private var seed: String = "0"
-    @State private var useSeed = false
-    @State private var generatedImage: NSImage?
     @State private var isGenerating = false
 
     // Memory settings
@@ -733,17 +751,6 @@ struct ImageGenerationView: View {
             }
             .frame(minWidth: 400)
         }
-        .onChange(of: promptToUse) { newValue in
-            // Apply prompt from history when user clicks "Use This Prompt"
-            if !newValue.isEmpty {
-                prompt = newValue
-                width = widthToUse
-                height = heightToUse
-                numSteps = stepsToUse
-                // Clear the binding so we can detect future changes
-                promptToUse = ""
-            }
-        }
     }
 
     private var attentionSliceDescription: String {
@@ -801,18 +808,18 @@ struct ImageGenerationView: View {
         logManager.log("[z-image] Loading models from \(modelDirectory)...")
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let success = ZImageBridge.shared.loadImageModels(modelDir: modelDirectory)
+            let errorMessage = ZImageBridge.shared.loadImageModels(modelDir: modelDirectory)
 
             DispatchQueue.main.async {
                 isLoading = false
-                modelsLoaded = success
-                if success {
+                if let error = errorMessage {
+                    modelsLoaded = false
+                    statusMessage = "Failed: \(error)"
+                    logManager.log("[z-image] Error: \(error)")
+                } else {
+                    modelsLoaded = true
                     statusMessage = "Models loaded successfully"
                     logManager.log("[z-image] Models loaded successfully")
-                } else {
-                    let error = ZImageBridge.shared.lastError ?? "Unknown error"
-                    statusMessage = "Failed to load models: \(error)"
-                    logManager.log("[z-image] Error: Failed to load models: \(error)")
                 }
             }
         }
@@ -1055,6 +1062,8 @@ struct SettingsView: View {
     @State private var attentionSliceSize: Int32 = 0
     @State private var lowMemoryMode = false
     @State private var numSteps: Int32 = 8
+    @State private var isDownloading = false
+    @State private var downloadProgress = ""
 
     var body: some View {
         ScrollView {
@@ -1071,9 +1080,145 @@ struct SettingsView: View {
                             }
                         }
 
-                        Text("Directory should contain: ae.bpk, qwen3_4b_text_encoder.bpk, z_image_turbo_bf16.bpk")
+                        Text("Required: z_image_turbo_bf16.bpk, longcat_dit_bf16.bpk, wan_vae.bpk, umt5-xxl-enc-bf16.bpk")
                             .font(.caption)
                             .foregroundColor(.secondary)
+                    }
+                    .padding()
+                }
+
+                // Download Models from HuggingFace
+                GroupBox("Download Models from HuggingFace") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Download pre-converted models from holgt's HuggingFace repos")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if isDownloading {
+                            HStack {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                Text(downloadProgress)
+                                    .font(.caption)
+                            }
+                        }
+
+                        // Model download buttons
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text("ZImage Turbo (11GB)")
+                                        .font(.subheadline)
+                                    Text("holgt/z-image-turbo-burn")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Button("Download") {
+                                    downloadModel(repo: "holgt/z-image-turbo-burn", file: "z_image_turbo_bf16.bpk")
+                                }
+                                .disabled(isDownloading || modelDirectory.isEmpty)
+                            }
+
+                            Divider()
+
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text("LongCat DiT (25GB)")
+                                        .font(.subheadline)
+                                    Text("holgt/longcat-dit-burn")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Button("Download") {
+                                    downloadModel(repo: "holgt/longcat-dit-burn", file: "longcat_dit_bf16.bpk")
+                                }
+                                .disabled(isDownloading || modelDirectory.isEmpty)
+                            }
+
+                            Divider()
+
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text("WAN VAE (242MB)")
+                                        .font(.subheadline)
+                                    Text("holgt/wan-vae-burn")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Button("Download") {
+                                    downloadModel(repo: "holgt/wan-vae-burn", file: "wan_vae.bpk")
+                                }
+                                .disabled(isDownloading || modelDirectory.isEmpty)
+                            }
+
+                            Divider()
+
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text("UMT5-XXL Encoder (11GB)")
+                                        .font(.subheadline)
+                                    Text("holgt/umt5-xxl-burn")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Button("Download") {
+                                    downloadModel(repo: "holgt/umt5-xxl-burn", file: "umt5-xxl-enc-bf16.bpk")
+                                }
+                                .disabled(isDownloading || modelDirectory.isEmpty)
+                            }
+
+                            Divider()
+
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text("Qwen3 4B Text Encoder (8GB)")
+                                        .font(.subheadline)
+                                    Text("holgt/qwen3-4b-text-encoder-burn")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Button("Download") {
+                                    downloadModel(repo: "holgt/qwen3-4b-text-encoder-burn", file: "qwen3_4b_text_encoder.bpk")
+                                }
+                                .disabled(isDownloading || modelDirectory.isEmpty)
+                            }
+
+                            Divider()
+
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text("Qwen3 0.6B Chat (1.4GB)")
+                                        .font(.subheadline)
+                                    Text("holgt/qwen3-0.6b-burn")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Button("Download") {
+                                    downloadModel(repo: "holgt/qwen3-0.6b-burn", file: "qwen3_0.6b.bpk")
+                                }
+                                .disabled(isDownloading || modelDirectory.isEmpty)
+                            }
+                        }
+
+                        Divider()
+
+                        Button("Download All Models") {
+                            downloadAllModels()
+                        }
+                        .disabled(isDownloading || modelDirectory.isEmpty)
+                        .buttonStyle(.borderedProminent)
+
+                        if modelDirectory.isEmpty {
+                            Text("Set a model directory first before downloading")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                        }
                     }
                     .padding()
                 }
@@ -1242,17 +1387,18 @@ struct SettingsView: View {
         logManager.log("[z-image] Loading models from \(modelDirectory)...")
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let success = ZImageBridge.shared.loadImageModels(modelDir: modelDirectory)
+            let errorMessage = ZImageBridge.shared.loadImageModels(modelDir: modelDirectory)
 
             DispatchQueue.main.async {
                 isLoading = false
-                modelsLoaded = success
-                if success {
+                if let error = errorMessage {
+                    modelsLoaded = false
+                    statusMessage = "Failed: \(error)"
+                    logManager.log("[z-image] Error: \(error)")
+                } else {
+                    modelsLoaded = true
                     statusMessage = "Models loaded"
                     logManager.log("[z-image] Models loaded successfully")
-                } else {
-                    statusMessage = "Failed to load models"
-                    logManager.log("[z-image] Error: Failed to load models")
                 }
             }
         }
@@ -1264,6 +1410,101 @@ struct SettingsView: View {
         logManager.log("[z-image] Models unloaded")
         modelsLoaded = false
         statusMessage = "Models unloaded"
+    }
+
+    private func downloadModel(repo: String, file: String) {
+        isDownloading = true
+        downloadProgress = "Downloading \(file)..."
+        logManager.log("[download] Starting download: \(repo)/\(file)")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outputPath = URL(fileURLWithPath: modelDirectory).appendingPathComponent(file).path
+
+            // Use huggingface-cli to download
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/huggingface-cli")
+            process.arguments = ["download", repo, file, "--local-dir", modelDirectory]
+
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+
+                DispatchQueue.main.async {
+                    isDownloading = false
+                    if process.terminationStatus == 0 {
+                        downloadProgress = "Downloaded \(file)"
+                        logManager.log("[download] Successfully downloaded \(file)")
+                    } else {
+                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                        let output = String(data: data, encoding: .utf8) ?? "Unknown error"
+                        downloadProgress = "Failed to download \(file)"
+                        logManager.log("[download] Error: \(output)")
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    isDownloading = false
+                    downloadProgress = "Error: \(error.localizedDescription)"
+                    logManager.log("[download] Error: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func downloadAllModels() {
+        isDownloading = true
+        downloadProgress = "Downloading all models..."
+        logManager.log("[download] Starting download of all models...")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let models = [
+                ("holgt/z-image-turbo-burn", "z_image_turbo_bf16.bpk"),
+                ("holgt/longcat-dit-burn", "longcat_dit_bf16.bpk"),
+                ("holgt/wan-vae-burn", "wan_vae.bpk"),
+                ("holgt/umt5-xxl-burn", "umt5-xxl-enc-bf16.bpk"),
+                ("holgt/qwen3-4b-text-encoder-burn", "qwen3_4b_text_encoder.bpk"),
+                ("holgt/qwen3-0.6b-burn", "qwen3_0.6b.bpk")
+            ]
+
+            for (index, (repo, file)) in models.enumerated() {
+                DispatchQueue.main.async {
+                    downloadProgress = "Downloading \(file) (\(index + 1)/\(models.count))..."
+                }
+
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/huggingface-cli")
+                process.arguments = ["download", repo, file, "--local-dir", modelDirectory]
+
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+
+                    if process.terminationStatus == 0 {
+                        DispatchQueue.main.async {
+                            logManager.log("[download] Downloaded \(file)")
+                        }
+                    } else {
+                        DispatchQueue.main.async {
+                            logManager.log("[download] Failed to download \(file)")
+                        }
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        logManager.log("[download] Error downloading \(file): \(error.localizedDescription)")
+                    }
+                }
+            }
+
+            DispatchQueue.main.async {
+                isDownloading = false
+                downloadProgress = "All downloads complete"
+                logManager.log("[download] All downloads complete")
+            }
+        }
     }
 }
 

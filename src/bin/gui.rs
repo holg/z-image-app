@@ -18,6 +18,13 @@ use qwen3_burn::{Qwen3Config, Qwen3ForCausalLM, Qwen3Model, Qwen3Tokenizer};
 use z_image::modules::ae::{AutoEncoder, AutoEncoderConfig};
 use z_image::modules::transformer::{ZImageModel, ZImageModelConfig};
 
+#[cfg(feature = "train")]
+#[path = "../training/mod.rs"]
+mod training;
+
+#[cfg(feature = "train")]
+use z_image::modules::transformer::lora_transformer::LoraConfig;
+
 // Backend selection based on compile-time features
 #[cfg(feature = "metal")]
 mod backend {
@@ -142,6 +149,19 @@ enum WorkerMessage {
     ModelLoadComplete(ModelType, Result<(), String>),
     DownloadProgress(String, f32),
     DownloadComplete(String, Result<(), String>),
+    #[cfg(feature = "train")]
+    TrainingProgress {
+        epoch: usize,
+        step: usize,
+        total_steps: usize,
+        loss: f32,
+    },
+    #[cfg(feature = "train")]
+    TrainingComplete(Result<(), String>),
+    #[cfg(feature = "train")]
+    LatentCacheProgress(usize, usize),
+    #[cfg(feature = "train")]
+    LatentCacheComplete(Result<(), String>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -157,6 +177,8 @@ enum Tab {
     Chat,
     Settings,
     Models,
+    #[cfg(feature = "train")]
+    Training,
 }
 
 /// A generated image in history
@@ -247,6 +269,48 @@ struct ZImageApp {
     // Text models
     text_model: Arc<Mutex<Option<Qwen3ForCausalLM<Backend>>>>,
     text_tokenizer: Arc<Mutex<Option<Qwen3Tokenizer>>>,
+
+    // Training state
+    #[cfg(feature = "train")]
+    training_dataset_dir: String,
+    #[cfg(feature = "train")]
+    training_dataset_count: usize,
+    #[cfg(feature = "train")]
+    lora_rank: i32,
+    #[cfg(feature = "train")]
+    lora_alpha: f32,
+    #[cfg(feature = "train")]
+    target_attention: bool,
+    #[cfg(feature = "train")]
+    target_feed_forward: bool,
+    #[cfg(feature = "train")]
+    target_refiners: bool,
+    #[cfg(feature = "train")]
+    train_learning_rate: f64,
+    #[cfg(feature = "train")]
+    train_num_epochs: i32,
+    #[cfg(feature = "train")]
+    train_resolution: i32,
+    #[cfg(feature = "train")]
+    use_latent_cache: bool,
+    #[cfg(feature = "train")]
+    is_caching_latents: bool,
+    #[cfg(feature = "train")]
+    latent_cache_progress: (usize, usize),
+    #[cfg(feature = "train")]
+    is_training: bool,
+    #[cfg(feature = "train")]
+    training_epoch: usize,
+    #[cfg(feature = "train")]
+    training_step: usize,
+    #[cfg(feature = "train")]
+    training_total_steps: usize,
+    #[cfg(feature = "train")]
+    training_losses: Vec<f32>,
+    #[cfg(feature = "train")]
+    lora_output_path: String,
+    #[cfg(feature = "train")]
+    cancel_training_tx: Option<Sender<()>>,
 }
 
 struct ChatMessage {
@@ -336,6 +400,48 @@ impl ZImageApp {
             // Text models
             text_model: Arc::new(Mutex::new(None)),
             text_tokenizer: Arc::new(Mutex::new(None)),
+
+            // Training state
+            #[cfg(feature = "train")]
+            training_dataset_dir: String::new(),
+            #[cfg(feature = "train")]
+            training_dataset_count: 0,
+            #[cfg(feature = "train")]
+            lora_rank: 16,
+            #[cfg(feature = "train")]
+            lora_alpha: 16.0,
+            #[cfg(feature = "train")]
+            target_attention: true,
+            #[cfg(feature = "train")]
+            target_feed_forward: true,
+            #[cfg(feature = "train")]
+            target_refiners: true,
+            #[cfg(feature = "train")]
+            train_learning_rate: 1e-4,
+            #[cfg(feature = "train")]
+            train_num_epochs: 100,
+            #[cfg(feature = "train")]
+            train_resolution: 512,
+            #[cfg(feature = "train")]
+            use_latent_cache: false,
+            #[cfg(feature = "train")]
+            is_caching_latents: false,
+            #[cfg(feature = "train")]
+            latent_cache_progress: (0, 0),
+            #[cfg(feature = "train")]
+            is_training: false,
+            #[cfg(feature = "train")]
+            training_epoch: 0,
+            #[cfg(feature = "train")]
+            training_step: 0,
+            #[cfg(feature = "train")]
+            training_total_steps: 0,
+            #[cfg(feature = "train")]
+            training_losses: Vec::new(),
+            #[cfg(feature = "train")]
+            lora_output_path: String::new(),
+            #[cfg(feature = "train")]
+            cancel_training_tx: None,
         };
 
         // Initialize device
@@ -634,7 +740,10 @@ impl ZImageApp {
             let te_path = if te_bpk.exists() { te_bpk } else { te_safetensors };
             let _ = tx.send(WorkerMessage::Log(format!("Loading text encoder from {:?}...", te_path)));
 
+            let t0 = std::time::Instant::now();
             let mut text_encoder: Qwen3Model<Backend> = Qwen3Config::z_image_text_encoder().init(&device);
+            let _ = tx.send(WorkerMessage::Log(format!("  Text encoder init: {:.1}s", t0.elapsed().as_secs_f32())));
+            let t1 = std::time::Instant::now();
             if let Err(e) = text_encoder.load_weights(&te_path) {
                 let _ = tx.send(WorkerMessage::ModelLoadComplete(
                     ModelType::Image,
@@ -642,13 +751,17 @@ impl ZImageApp {
                 ));
                 return;
             }
+            let _ = tx.send(WorkerMessage::Log(format!("  Text encoder weights: {:.1}s", t1.elapsed().as_secs_f32())));
             *image_text_encoder.lock().unwrap() = Some(text_encoder);
             let _ = tx.send(WorkerMessage::Log("Text encoder loaded".to_string()));
 
             let transformer_path = model_dir.join("z_image_turbo_bf16.bpk");
             let _ = tx.send(WorkerMessage::Log("Loading transformer...".to_string()));
 
+            let t0 = std::time::Instant::now();
             let mut transformer: ZImageModel<Backend> = ZImageModelConfig::default().init(&device);
+            let _ = tx.send(WorkerMessage::Log(format!("  Transformer init: {:.1}s", t0.elapsed().as_secs_f32())));
+            let t1 = std::time::Instant::now();
             if let Err(e) = transformer.load_weights(&transformer_path) {
                 let _ = tx.send(WorkerMessage::ModelLoadComplete(
                     ModelType::Image,
@@ -656,6 +769,7 @@ impl ZImageApp {
                 ));
                 return;
             }
+            let _ = tx.send(WorkerMessage::Log(format!("  Transformer weights: {:.1}s", t1.elapsed().as_secs_f32())));
             *image_transformer.lock().unwrap() = Some(transformer);
             let _ = tx.send(WorkerMessage::Log("Transformer loaded".to_string()));
 
@@ -664,7 +778,10 @@ impl ZImageApp {
             let ae_path = if ae_bpk.exists() { ae_bpk } else { ae_safetensors };
             let _ = tx.send(WorkerMessage::Log(format!("Loading autoencoder from {:?}...", ae_path)));
 
+            let t0 = std::time::Instant::now();
             let mut ae: AutoEncoder<Backend> = AutoEncoderConfig::flux_ae().init(&device);
+            let _ = tx.send(WorkerMessage::Log(format!("  AE init: {:.1}s", t0.elapsed().as_secs_f32())));
+            let t1 = std::time::Instant::now();
             if let Err(e) = ae.load_weights(&ae_path) {
                 let _ = tx.send(WorkerMessage::ModelLoadComplete(
                     ModelType::Image,
@@ -672,6 +789,7 @@ impl ZImageApp {
                 ));
                 return;
             }
+            let _ = tx.send(WorkerMessage::Log(format!("  AE weights: {:.1}s", t1.elapsed().as_secs_f32())));
             *image_autoencoder.lock().unwrap() = Some(ae);
 
             let elapsed = start.elapsed().as_secs_f32();
@@ -904,8 +1022,285 @@ impl ZImageApp {
                         }
                     }
                 }
+                #[cfg(feature = "train")]
+                WorkerMessage::TrainingProgress { epoch, step, total_steps, loss } => {
+                    self.training_epoch = epoch;
+                    self.training_step = step;
+                    self.training_total_steps = total_steps;
+                    self.training_losses.push(loss);
+                }
+                #[cfg(feature = "train")]
+                WorkerMessage::TrainingComplete(result) => {
+                    self.is_training = false;
+                    self.cancel_training_tx = None;
+                    match result {
+                        Ok(()) => self.log("Training completed successfully"),
+                        Err(e) => self.log(&format!("Training error: {}", e)),
+                    }
+                }
+                #[cfg(feature = "train")]
+                WorkerMessage::LatentCacheProgress(current, total) => {
+                    self.latent_cache_progress = (current, total);
+                }
+                #[cfg(feature = "train")]
+                WorkerMessage::LatentCacheComplete(result) => {
+                    self.is_caching_latents = false;
+                    match result {
+                        Ok(()) => self.log("Latent cache computed successfully"),
+                        Err(e) => self.log(&format!("Latent cache error: {}", e)),
+                    }
+                }
             }
         }
+    }
+
+    #[cfg(feature = "train")]
+    fn show_training_tab(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("LoRA Training");
+            ui.label("Fine-tune Z-Image with your own images using LoRA adapters.");
+            ui.add_space(10.0);
+
+            // --- Dataset Section ---
+            ui.group(|ui| {
+                ui.heading("Dataset");
+                ui.horizontal(|ui| {
+                    ui.label("Directory:");
+                    ui.text_edit_singleline(&mut self.training_dataset_dir);
+                    if ui.button("Browse...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.training_dataset_dir = path.to_string_lossy().to_string();
+                            // Scan dataset
+                            match training::dataset::TrainingDataset::from_directory(&path) {
+                                Ok(ds) => {
+                                    self.training_dataset_count = ds.len();
+                                    self.log(&format!("Found {} image+caption pairs", ds.len()));
+                                }
+                                Err(e) => {
+                                    self.training_dataset_count = 0;
+                                    self.log(&format!("Dataset error: {}", e));
+                                }
+                            }
+                        }
+                    }
+                });
+                if self.training_dataset_count > 0 {
+                    ui.colored_label(
+                        egui::Color32::GREEN,
+                        format!("Found {} image+caption pairs", self.training_dataset_count),
+                    );
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Resolution:");
+                    ui.add(egui::Slider::new(&mut self.train_resolution, 256..=1024).step_by(128.0));
+                    ui.label(format!("{}x{}", self.train_resolution, self.train_resolution));
+                });
+            });
+
+            ui.add_space(10.0);
+
+            // --- LoRA Configuration ---
+            ui.group(|ui| {
+                ui.heading("LoRA Configuration");
+
+                ui.horizontal(|ui| {
+                    ui.label("Rank:");
+                    ui.add(egui::Slider::new(&mut self.lora_rank, 4..=64));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Alpha:");
+                    ui.add(egui::Slider::new(&mut self.lora_alpha, 0.1..=64.0));
+                });
+
+                ui.add_space(5.0);
+                ui.label("Target layers:");
+                ui.checkbox(&mut self.target_attention, "Attention (qkv, to_out) - 30 layers");
+                ui.checkbox(&mut self.target_feed_forward, "Feed-Forward (w1, w2, w3) - 30 layers");
+                ui.checkbox(&mut self.target_refiners, "Refiners (noise + context) - 4 layers");
+
+                // Estimate params
+                let layers_per_block = (if self.target_attention { 2 } else { 0 })
+                    + (if self.target_feed_forward { 3 } else { 0 });
+                let main_blocks = 30;
+                let refiner_blocks = if self.target_refiners { 4 } else { 0 };
+                let total_lora_layers = (main_blocks + refiner_blocks) * layers_per_block;
+                let avg_params_per_layer = self.lora_rank as usize * (3840 + 3840); // rough average
+                let estimated_params = total_lora_layers * avg_params_per_layer;
+                ui.label(format!(
+                    "Estimated LoRA params: {:.1} M ({} adapted layers)",
+                    estimated_params as f64 / 1_000_000.0,
+                    total_lora_layers
+                ));
+            });
+
+            ui.add_space(10.0);
+
+            // --- Training Settings ---
+            ui.group(|ui| {
+                ui.heading("Training Settings");
+
+                ui.horizontal(|ui| {
+                    ui.label("Learning rate:");
+                    let mut lr_str = format!("{:.0e}", self.train_learning_rate);
+                    if ui.text_edit_singleline(&mut lr_str).changed() {
+                        if let Ok(lr) = lr_str.parse::<f64>() {
+                            self.train_learning_rate = lr;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Epochs:");
+                    ui.add(egui::Slider::new(&mut self.train_num_epochs, 1..=1000));
+                });
+
+                ui.add_space(5.0);
+                ui.checkbox(
+                    &mut self.use_latent_cache,
+                    "Pre-compute latent cache (saves VRAM during training)",
+                );
+            });
+
+            ui.add_space(10.0);
+
+            // --- Training Controls ---
+            ui.group(|ui| {
+                ui.heading("Controls");
+
+                let can_train = self.training_dataset_count > 0
+                    && self.image_models_loaded
+                    && !self.is_training
+                    && !self.is_caching_latents;
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_train, egui::Button::new("Start Training"))
+                        .clicked()
+                    {
+                        self.log("Training start requested - training pipeline ready for implementation");
+                        self.is_training = true;
+                        self.training_losses.clear();
+                        // TODO: spawn training thread once autodiff backend wiring is complete
+                        self.log("Note: Full training loop requires autodiff backend. LoRA model structure is ready.");
+                        self.is_training = false;
+                    }
+
+                    if ui
+                        .add_enabled(self.is_training, egui::Button::new("Stop"))
+                        .clicked()
+                    {
+                        if let Some(tx) = &self.cancel_training_tx {
+                            let _ = tx.send(());
+                        }
+                        self.log("Stopping training...");
+                    }
+                });
+
+                if self.is_training {
+                    ui.add_space(5.0);
+                    ui.label(format!(
+                        "Epoch {}/{} | Step {}/{} | Loss: {:.4}",
+                        self.training_epoch + 1,
+                        self.train_num_epochs,
+                        self.training_step + 1,
+                        self.training_total_steps,
+                        self.training_losses.last().unwrap_or(&0.0),
+                    ));
+
+                    let total = self.train_num_epochs as f32 * self.training_total_steps as f32;
+                    let current = self.training_epoch as f32 * self.training_total_steps as f32
+                        + self.training_step as f32;
+                    let progress = if total > 0.0 { current / total } else { 0.0 };
+                    ui.add(egui::ProgressBar::new(progress).show_percentage());
+                }
+            });
+
+            ui.add_space(10.0);
+
+            // --- Loss Curve ---
+            if !self.training_losses.is_empty() {
+                ui.group(|ui| {
+                    ui.heading("Loss Curve");
+
+                    let (rect, _response) =
+                        ui.allocate_exact_size(egui::vec2(ui.available_width(), 200.0), egui::Sense::hover());
+                    let painter = ui.painter_at(rect);
+
+                    let losses = &self.training_losses;
+                    if losses.len() >= 2 {
+                        let max_loss = losses.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                        let min_loss = losses.iter().cloned().fold(f32::INFINITY, f32::min);
+                        let range = (max_loss - min_loss).max(1e-6);
+
+                        let points: Vec<egui::Pos2> = losses
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &loss)| {
+                                let x = rect.left() + (i as f32 / (losses.len() - 1) as f32) * rect.width();
+                                let y = rect.bottom()
+                                    - ((loss - min_loss) / range) * rect.height();
+                                egui::pos2(x, y)
+                            })
+                            .collect();
+
+                        // Draw grid
+                        painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, egui::Color32::GRAY));
+
+                        // Draw loss curve
+                        for window in points.windows(2) {
+                            painter.line_segment(
+                                [window[0], window[1]],
+                                egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                            );
+                        }
+
+                        // Labels
+                        painter.text(
+                            rect.left_top() + egui::vec2(2.0, 2.0),
+                            egui::Align2::LEFT_TOP,
+                            format!("{:.4}", max_loss),
+                            egui::FontId::default(),
+                            egui::Color32::GRAY,
+                        );
+                        painter.text(
+                            rect.left_bottom() + egui::vec2(2.0, -2.0),
+                            egui::Align2::LEFT_BOTTOM,
+                            format!("{:.4}", min_loss),
+                            egui::FontId::default(),
+                            egui::Color32::GRAY,
+                        );
+                    }
+                });
+            }
+
+            ui.add_space(10.0);
+
+            // --- Export ---
+            ui.group(|ui| {
+                ui.heading("Export");
+                ui.horizontal(|ui| {
+                    ui.label("Output path:");
+                    ui.text_edit_singleline(&mut self.lora_output_path);
+                    if ui.button("Browse...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Safetensors", &["safetensors"])
+                            .save_file()
+                        {
+                            self.lora_output_path = path.to_string_lossy().to_string();
+                        }
+                    }
+                });
+                if ui
+                    .add_enabled(
+                        !self.is_training && !self.training_losses.is_empty(),
+                        egui::Button::new("Export LoRA Weights"),
+                    )
+                    .clicked()
+                {
+                    self.log("LoRA export: ready for implementation once training produces weights");
+                }
+            });
+        });
     }
 }
 
@@ -923,6 +1318,8 @@ impl eframe::App for ZImageApp {
                 ui.selectable_value(&mut self.current_tab, Tab::Chat, "Chat");
                 ui.selectable_value(&mut self.current_tab, Tab::Settings, "Settings");
                 ui.selectable_value(&mut self.current_tab, Tab::Models, "Models");
+                #[cfg(feature = "train")]
+                ui.selectable_value(&mut self.current_tab, Tab::Training, "Training");
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
@@ -990,6 +1387,8 @@ impl eframe::App for ZImageApp {
                 Tab::Chat => self.show_chat_tab(ui),
                 Tab::Settings => self.show_settings_tab(ui),
                 Tab::Models => self.show_models_tab(ui),
+                #[cfg(feature = "train")]
+                Tab::Training => self.show_training_tab(ui),
             }
         });
 
