@@ -1,149 +1,151 @@
 # Z-Image App
 
-**Pure Rust AI image generation** using the [Burn](https://burn.dev) deep learning framework.
+**Pure Rust AI image generation and fine-tuning** using the [Burn](https://burn.dev) deep learning framework.
 
-A native implementation of Z-Image Turbo (a fast diffusion model) entirely in Rust, with optional native UI wrappers for macOS (SwiftUI) and cross-platform (egui).
+A native implementation of [Z-Image Turbo](https://github.com/Tongyi-MAI/Z-Image) (a rectified flow model based on the S3-DiT architecture) entirely in Rust, with LoRA fine-tuning support and optional native UI wrappers for macOS (SwiftUI) and cross-platform (egui).
 
-## Project Vision
+## Features
 
-This project explores **what's possible with pure Rust ML inference**. The goal is not to compete with Python today, but to build on Rust's long-term advantages:
+- **Image Generation**: Z-Image Turbo rectified flow model (4-20 steps, 256-1024px)
+- **LoRA Fine-Tuning**: Train custom subjects (e.g., specific vehicles, characters) directly in Rust/Burn
+- **Text Chat**: Qwen3-0.6B conversational AI
+- **Cross-platform**: macOS, Windows, Linux from the same codebase
+- **Multiple GPU backends**: Metal (macOS), CUDA (NVIDIA), Vulkan, CPU fallback
+- **Memory optimization**: Attention slicing, sequence chunking, low-memory mode
+- **Two UIs**: Native macOS SwiftUI app and cross-platform egui GUI
 
-| Rust Advantage | Current State | Future Potential |
-|----------------|---------------|------------------|
-| Single binary distribution | Works | No Python env, just download and run |
-| Memory safety | Works | Predictable behavior, no GC pauses |
-| Cross-platform | Works | Same codebase for macOS/Windows/Linux |
-| Performance | Similar to Python | Will improve as Burn/Metal mature |
-| VRAM efficiency | Similar to Python | Flash attention coming to Burn |
+## Prerequisites
 
-### Honest Assessment
-
-The Rust ML ecosystem (Burn, Candle, CubeCL) is young but growing fast. Currently:
-- No significant speed advantage over Python (PyTorch/MLX)
-- No significant VRAM advantage (naive attention, not flash attention yet)
-- Fewer features than ComfyUI/diffusers
-
-**But**: Single-binary deployment, true cross-compilation, and memory safety make this a compelling long-term bet as the ecosystem matures.
-
-## Architecture
-
-**Core Principle: Rust First** - All ML logic lives in Rust. UI layers are thin wrappers.
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        User Interfaces                          │
-├─────────────────────────┬───────────────────────────────────────┤
-│   macOS Native (Swift)  │     Cross-Platform (egui/Rust)        │
-│   - SwiftUI             │     - Windows, Linux, macOS           │
-│   - Native look & feel  │     - Pure Rust, single binary        │
-│   - UI only, no ML code │     - ~2000 lines                     │
-└───────────┬─────────────┴──────────────┬────────────────────────┘
-            │         C FFI Bridge        │
-            ▼                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Rust Core (libz_image_ffi)                   │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │ Image Gen   │  │ Text Chat   │  │ Memory Management       │  │
-│  │ - Z-Image   │  │ - Qwen3     │  │ - Model caching         │  │
-│  │ - Turbo     │  │ - 0.6B      │  │ - Attention slicing     │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                         Burn Framework                          │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐            │
-│  │ Candle  │  │  WGPU   │  │  CUDA   │  │ ndarray │            │
-│  │ +Metal  │  │ +Vulkan │  │(NVIDIA) │  │  (CPU)  │            │
-│  │ (macOS) │  │         │  │         │  │         │            │
-│  └─────────┘  └─────────┘  └─────────┘  └─────────┘            │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-| Component | Language | Purpose | Lines |
-|-----------|----------|---------|-------|
-| **Core Library** | Rust | All ML inference, model loading, memory mgmt | ~750 |
-| **egui GUI** | Rust | Cross-platform native GUI | ~2000 |
-| **SwiftUI App** | Swift | macOS-native look & feel (UI only) | ~1500 |
-| **FFI Bridge** | Swift | Calls Rust functions | ~200 |
-
-The Swift code contains **zero ML logic** - it only calls Rust FFI functions and renders UI.
+- **Rust** (stable, 2024 edition): https://rustup.rs
+- **Git**
+- **GPU**: Apple Silicon Mac (Metal), NVIDIA GPU (CUDA), or Vulkan-capable GPU
+- **macOS SwiftUI build** (optional): Xcode command line tools (`xcode-select --install`)
 
 ## Required Repositories
 
-This project uses relative path dependencies. Clone these repositories as siblings:
+This project uses **relative path dependencies** via Cargo. All repositories must be cloned as siblings in the same parent directory.
 
 ```
-parent-directory/
-├── burn/              # Burn framework (forked)
-├── z-image-burn/      # Z-Image model implementation
-├── qwen3-burn/        # Qwen3 model implementation
-└── z-image-app/       # This repository
+z-image-workspace/
+├── burn/              # Burn deep learning framework (fork with fixes)
+├── z-image-burn/      # Z-Image model implementation (FLUX VAE, S3-DiT transformer)
+├── qwen3-burn/        # Qwen3 language model (text encoder + chat)
+├── z-image-app/       # This repository (application, training, UI)
+├── longcat-burn/      # (Optional) LongCat video generation model
+└── umt5-burn/         # (Optional) UMT5 text encoder (for video generation)
 ```
 
-### Clone Commands
+### Setup
 
 ```bash
-# Create parent directory
-mkdir z-image-project && cd z-image-project
+# Create workspace directory
+mkdir z-image-workspace && cd z-image-workspace
 
-# Clone required repositories
+# 1. Burn framework (fork with Z-Image compatibility fixes)
 git clone https://github.com/holg/burn.git
-git clone https://github.com/holg/z-image-burn.git
+
+# 2. Z-Image model (transformer, FLUX VAE, LoRA modules)
+#    IMPORTANT: use the 'develop' branch
+git clone -b develop https://github.com/holg/z-image-burn.git
+
+# 3. Qwen3 language model (text encoding + chat)
 git clone https://github.com/holg/qwen3-burn.git
+
+# 4. This application
 git clone https://github.com/holg/z-image-app.git
 
-# Build
-cd z-image-app
-cargo build --release --features "egui,metal"  # macOS
+# Optional: for video generation (LongCat)
+git clone https://github.com/holg/longcat-burn.git
+git clone https://github.com/holg/umt5-burn.git
 ```
+
+### Verify Setup
+
+```bash
+cd z-image-app
+
+# Check all dependencies are reachable
+ls ../burn/crates/burn/Cargo.toml      # Burn framework
+ls ../z-image-burn/z-image/Cargo.toml  # Z-Image model
+ls ../qwen3-burn/Cargo.toml            # Qwen3
+# Optional (only needed with "video" feature):
+# ls ../longcat-burn/Cargo.toml        # LongCat
+# ls ../umt5-burn/Cargo.toml           # UMT5
+
+# Build (macOS with Metal)
+cargo build --release --features "egui,metal"
+```
+
+If any `ls` command fails, you're missing a repository or it's in the wrong location.
+
+### Repository Overview
+
+| Repository | Description | GitHub |
+|------------|-------------|--------|
+| [burn](https://github.com/holg/burn) | Fork of [Tracel AI's Burn](https://github.com/tracel-ai/burn) with compatibility fixes | `holg/burn` |
+| [z-image-burn](https://github.com/holg/z-image-burn) | Z-Image S3-DiT transformer, FLUX VAE encoder/decoder, LoRA modules | `holg/z-image-burn` (branch: **develop**) |
+| [qwen3-burn](https://github.com/holg/qwen3-burn) | Qwen3 model family: 4B text encoder for Z-Image + 0.6B for chat | `holg/qwen3-burn` |
+| [longcat-burn](https://github.com/holg/longcat-burn) | LongCat 13.6B DiT for text/image-to-video generation (optional) | `holg/longcat-burn` |
+| [umt5-burn](https://github.com/holg/umt5-burn) | UMT5 text encoder used by LongCat video generation (optional) | `holg/umt5-burn` |
+| [z-image-app](https://github.com/holg/z-image-app) | This repo: application layer, training pipeline, GUIs | `holg/z-image-app` |
+
+## Model Weights
+
+Download pre-converted BurnPack (`.bpk`) model weights from HuggingFace. The app also includes an in-app downloader.
+
+### Image Generation (~20 GB)
+
+From [holgt/z-image-burn](https://huggingface.co/holgt/z-image-burn):
+
+| File | Size | Description |
+|------|------|-------------|
+| `z_image_turbo_bf16.bpk` | 12.3 GB | Z-Image Turbo transformer (S3-DiT, 30 layers, dim 3840) |
+| `qwen3_4b_text_encoder.bpk` | 8.0 GB | Qwen3-4B text encoder for prompt conditioning |
+| `ae.bpk` | 198 MB | FLUX VAE autoencoder (encoder + decoder) |
+| `qwen3-tokenizer.json` | 11 MB | Tokenizer for text encoding |
+
+### Text Chat (~1.5 GB)
+
+From [holgt/qwen3-0.6b-burn](https://huggingface.co/holgt/qwen3-0.6b-burn):
+
+| File | Size | Description |
+|------|------|-------------|
+| `model.bpk` | 1.5 GB | Qwen3-0.6B causal language model |
+| `tokenizer.json` | 11 MB | Tokenizer |
+
+Place all image generation model files in a single directory (e.g., `~/z-image-models/`).
 
 ## Quick Start
 
 ### Cross-Platform egui GUI (Recommended)
 
-#### macOS (Metal GPU)
 ```bash
-cargo build --release --features "egui,metal"
-./target/release/z-image-gui
-```
+# macOS (Metal GPU)
+cargo run --release --bin z-image-gui --features "egui,metal"
 
-#### Windows/Linux with NVIDIA GPU (CUDA)
-```bash
-cargo build --release --features "egui,cuda"
-./target/release/z-image-gui      # Linux
-.\target\release\z-image-gui.exe  # Windows
-```
+# Windows/Linux with NVIDIA GPU (CUDA)
+cargo run --release --bin z-image-gui --features "egui,cuda"
 
-#### Windows/Linux with AMD/Intel GPU (Vulkan)
-```bash
-cargo build --release --features "egui,vulkan"
-./target/release/z-image-gui
-```
+# Windows/Linux with AMD/Intel GPU (Vulkan)
+cargo run --release --bin z-image-gui --features "egui,vulkan"
 
-#### CPU only (any platform, slow)
-```bash
-cargo build --release --features "egui,cpu"
-./target/release/z-image-gui
+# CPU only (any platform, slow)
+cargo run --release --bin z-image-gui --features "egui,cpu"
 ```
 
 ### Native macOS App (SwiftUI)
 
-For native macOS look and feel:
-
 ```bash
-# Default: Candle + Metal backend
-./build_app.sh
-
-# Alternative backends
-./build_app.sh wgpu-metal    # WGPU + Metal (experimental)
-./build_app.sh cpu           # CPU only (slow)
+# Build and package as ZImage.app
+./build_app.sh            # Default: Metal backend
+./build_app.sh wgpu-metal # Alternative: WGPU + Metal
+./build_app.sh cpu        # CPU only (slow)
 
 # Run
 open ZImage.app
 ```
 
-### Command Line Tools
+### Command Line
 
 ```bash
 # Generate an image
@@ -151,38 +153,148 @@ cargo run --release --bin test_generate --features metal -- \
     --model-dir ~/z-image-models \
     --prompt "A serene mountain landscape at sunset" \
     --output output.png \
-    --width 512 --height 512 --steps 8
+    --width 512 --height 512
 
-# Text generation
+# Text chat
 cargo run --release --bin test_chat --features metal -- \
-    --model-dir ~/z-image-models/qwen3-0.6b \
+    --model-dir ~/z-image-models \
     --prompt "Explain quantum computing"
 ```
 
-## Features
+## LoRA Fine-Tuning
 
-- **Image Generation**: Z-Image Turbo diffusion model (4-20 steps, 256-1024px)
-- **Text Chat**: Qwen3-0.6B conversational AI
-- **Cross-platform**: macOS, Windows, Linux from same codebase
-- **Multiple backends**: Metal, CUDA, Vulkan, CPU
-- **Memory optimization**: Attention slicing, low-memory mode
-- **Generation history**: Browse and reuse previous prompts
+Train the Z-Image model on custom subjects using LoRA (Low-Rank Adaptation) - entirely in Rust, no Python required.
 
-## Models
+### How It Works
 
-Download models from HuggingFace (or use the in-app downloader):
+1. **Base model stays frozen** - only small LoRA adapter matrices are trained
+2. **Text encoder is NOT modified** - it provides prompt embeddings as-is
+3. **Flow matching objective** - the training learns velocity prediction: `loss = MSE(v_predicted, v_target)`
+4. **Result**: A small LoRA weights file (~50-100 MB) that customizes the base model
 
-### Image Generation (~20 GB)
-From [holgt/z-image-burn](https://huggingface.co/holgt/z-image-burn):
-- `z_image_turbo_bf16.bpk` (12.3 GB) - Transformer
-- `qwen3_4b_text_encoder.bpk` (8.0 GB) - Text encoder
-- `ae.bpk` (198 MB) - Autoencoder
-- `qwen3-tokenizer.json` (11 MB) - Tokenizer
+### Training Data Format
 
-### Text Chat (~1.5 GB)
-From [holgt/qwen3-0.6b-burn](https://huggingface.co/holgt/qwen3-0.6b-burn):
-- `model.bpk` (1.5 GB) - Qwen3-0.6B weights
-- `tokenizer.json` (11 MB) - Tokenizer
+Prepare a directory with image files and matching `.txt` caption files:
+
+```
+training_data/uaz_469/
+├── uaz_001.jpg
+├── uaz_001.txt    → "a photo of sks uaz469 off-road vehicle on a mountain road"
+├── uaz_002.jpg
+├── uaz_002.txt    → "a sks uaz469 parked in front of a brick building, side view"
+├── uaz_003.jpg
+├── uaz_003.txt    → "a sks uaz469 driving through mud in the forest"
+└── ...
+```
+
+Use a **rare trigger token** (like `sks`) + class noun (like `uaz469`) consistently across all captions. Vary the scene descriptions to teach the model the subject identity across different contexts.
+
+Recommended: **10-20 images** per subject, different angles and backgrounds.
+
+### Training Features
+
+- **LoRA rank/alpha**: Configurable (default: rank 16, alpha 16.0)
+- **Target layers**: Attention (qkv, to_out), Feed-Forward (w1, w2, w3), Refiners
+- **Latent caching**: Pre-compute image latents and text embeddings to free VRAM during training
+- **Training tab**: Integrated in the egui GUI with dataset browser, loss curve, and export
+
+### Building with Training Support
+
+```bash
+cargo run --release --bin z-image-gui --features "egui,metal,train"
+```
+
+The `train` feature enables `burn/autodiff` for gradient computation.
+
+## Architecture
+
+**Core Principle: Rust First** - All ML logic (inference, training, model loading) lives in Rust. UI layers are thin wrappers.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        User Interfaces                           │
+├──────────────────────────┬───────────────────────────────────────┤
+│   macOS Native (Swift)   │     Cross-Platform (egui/Rust)        │
+│   - SwiftUI              │     - Windows, Linux, macOS           │
+│   - Native look & feel   │     - Pure Rust, single binary        │
+│   - UI only, no ML code  │     - Includes Training tab           │
+└────────────┬─────────────┴──────────────┬────────────────────────┘
+             │         C FFI Bridge       │
+             ▼                            ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    Rust Core (z-image-app)                        │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────────────────────────┐  │
+│  │ Image Gen   │  │ Text Chat   │  │ LoRA Training            │  │
+│  │ - Z-Image   │  │ - Qwen3     │  │ - Flow matching          │  │
+│  │ - Turbo     │  │ - 0.6B      │  │ - Latent caching         │  │
+│  └─────────────┘  └─────────────┘  └──────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+┌──────────────────┐ ┌───────────────┐ ┌───────────────┐
+│   z-image-burn   │ │  qwen3-burn   │ │ longcat-burn  │
+│ - S3-DiT (30 L)  │ │ - 4B encoder  │ │ - 13.6B DiT   │
+│ - FLUX VAE       │ │ - 0.6B chat   │ │ - Video gen   │
+│ - LoRA modules   │ │ - Tokenizer   │ │ - UMT5 text   │
+└──────────────────┘ └───────────────┘ └───────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    Burn Framework (fork)                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐         │
+│  │ Candle   │  │  WGPU    │  │  CUDA    │  │ ndarray  │         │
+│  │ +Metal   │  │ +Vulkan  │  │ (NVIDIA) │  │  (CPU)   │         │
+│  │ (macOS)  │  │          │  │          │  │          │         │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘         │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+## Project Structure
+
+```
+z-image-app/
+├── src/
+│   ├── lib.rs                    # FFI library (C-compatible API)
+│   ├── training/                 # LoRA training pipeline
+│   │   ├── mod.rs
+│   │   ├── dataset.rs            # Image + caption dataset loading
+│   │   ├── latent_cache.rs       # Pre-computed latent/embedding cache
+│   │   └── train_loop.rs         # Flow matching training loop
+│   └── bin/
+│       ├── gui.rs                # Cross-platform egui GUI (with Training tab)
+│       ├── gui_lowmem.rs         # Low-memory GUI variant
+│       ├── test_generate.rs      # CLI image generation
+│       ├── test_chat.rs          # CLI text chat
+│       ├── compute_embedding.rs  # Pre-compute text embeddings
+│       ├── generate_from_embedding.rs
+│       └── convert_models.rs     # Model format conversion
+├── ZImageApp/                    # macOS SwiftUI (UI only, no ML code)
+│   ├── ZImageApp.swift
+│   ├── ContentView.swift
+│   ├── ZImageBridge.swift        # FFI wrapper
+│   ├── LongCatBridge.swift       # Video generation FFI wrapper
+│   └── VideoGenerationView.swift
+├── z_image_ffi.h                 # Generated C header for FFI
+├── build_app.sh                  # macOS .app builder script
+├── Cargo.toml
+└── cubecl.toml                   # GPU tuning config
+```
+
+## Cargo Features
+
+| Feature | Description |
+|---------|-------------|
+| `metal` | Metal GPU backend via Candle (macOS) |
+| `cuda` | CUDA GPU backend via Candle (NVIDIA) |
+| `vulkan` | Vulkan GPU backend via WGPU |
+| `wgpu-metal` | Metal via WGPU (experimental) |
+| `cpu` | CPU-only via ndarray (slow, any platform) |
+| `egui` | Cross-platform GUI (eframe, egui_extras, rfd, etc.) |
+| `train` | LoRA training support (burn/autodiff) |
+| `video` | LongCat video generation (requires longcat-burn + umt5-burn) |
+| `video-metal` | Video + Metal backend |
+| `video-cuda` | Video + CUDA backend |
 
 ## Memory Requirements
 
@@ -194,33 +306,11 @@ From [holgt/qwen3-0.6b-burn](https://huggingface.co/holgt/qwen3-0.6b-burn):
 | 1024x1024  | ~32 GB        | Attention slicing: 8, Low memory mode |
 
 ### Low VRAM Tips
+
+- **Low Memory Mode**: Unloads text encoder during generation (~7.5 GB savings)
 - **Attention Slicing**: Set to 4-8 in Settings (trades speed for memory)
-- **Low Memory Mode**: Unloads text encoder during diffusion (~7.5GB savings)
+- **Sequence Chunking**: Reduces peak memory for attention computation
 - **Smaller images**: Start with 256x256 or 512x512
-
-## Project Structure
-
-```
-z-image-app/
-├── src/
-│   ├── lib.rs                 # FFI library (C-compatible API)
-│   └── bin/
-│       ├── gui.rs             # Cross-platform egui GUI
-│       ├── gui_lowmem.rs      # Low-memory variant
-│       ├── test_generate.rs   # CLI image generation
-│       ├── test_chat.rs       # CLI text generation
-│       ├── compute_embedding.rs
-│       ├── generate_from_embedding.rs
-│       └── convert_models.rs
-├── ZImageApp/                 # macOS SwiftUI (UI only, no ML code)
-│   ├── ZImageApp.swift
-│   ├── ContentView.swift
-│   └── ZImageBridge.swift     # FFI wrapper
-├── z_image_ffi.h              # C header for FFI
-├── build_app.sh               # macOS app builder
-├── Cargo.toml
-└── cubecl.toml                # GPU tuning config
-```
 
 ## FFI API
 
@@ -237,11 +327,8 @@ int32_t z_image_models_loaded(void);
 
 // Image generation
 int32_t z_image_generate(
-    const char* prompt,
-    const char* output_path,
-    const char* model_dir,
-    int32_t width,
-    int32_t height
+    const char* prompt, const char* output_path,
+    const char* model_dir, int32_t width, int32_t height
 );
 
 // Memory optimization
@@ -257,64 +344,40 @@ void qwen3_free_string(char* str);
 int32_t qwen3_unload(void);
 ```
 
-## Known Limitations & Future Work
+## Known Limitations
 
-### Current Limitations
-- **Performance**: Similar to Python (Burn's Candle backend uses naive attention)
-- **VRAM**: No significant advantage over PyTorch/MLX
-- **Ecosystem**: Fewer models, less community support than Python
-
-### Upstream Dependencies (Early/Unstable)
+- **Performance**: Similar to Python (Burn's Candle backend uses naive attention, no Flash Attention yet)
+- **VRAM**: No significant advantage over PyTorch/MLX currently
+- **Ecosystem**: Younger than Python ML ecosystem
 - **Burn Framework**: Pre-1.0, API may change
-- **Candle Metal**: Missing optimized SDPA/Flash Attention
-- **CubeCL**: Flash attention exists but WGPU-Metal integration experimental
 
-### Planned Improvements
-- [ ] Flash attention when Burn/Candle expose it
+## Roadmap
+
+- [x] Z-Image Turbo inference
+- [x] Multiple GPU backends (Metal, CUDA, Vulkan)
+- [x] Attention slicing and low-memory mode
+- [x] LoRA fine-tuning pipeline
+- [x] FLUX VAE encoder (for training)
+- [x] egui Training tab with loss curve
+- [ ] LoRA weight save/load (safetensors)
+- [ ] LoRA merge and inference
+- [ ] Flash attention (when Burn/Candle expose it)
 - [ ] INT8/INT4 quantization
-- [ ] LoRA support
 - [ ] Img2Img / Inpainting
-- [ ] ControlNet
-
-## Backend Requirements
-
-### Metal (macOS)
-- Apple Silicon or Intel Mac with Metal support
-- No additional setup required
-
-### CUDA (NVIDIA)
-- NVIDIA GPU with CUDA support
-- [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) installed
-- Verify: `nvcc --version` and `nvidia-smi`
-
-### Vulkan
-- Vulkan-capable GPU (most modern GPUs)
-- Vulkan runtime (usually included with GPU drivers)
-
-## Troubleshooting
-
-### High VRAM Usage
-1. Enable low memory mode in Settings
-2. Use smaller resolution (512x512)
-3. Reduce attention slice size (try 4 or 2)
-4. Use fewer inference steps (4-6)
-
-### Slow Generation
-1. Ensure GPU backend is active (not CPU)
-2. Check model loading completed
-3. Disable attention slicing (set to 0) if you have enough VRAM
-
-### Black/Corrupted Output
-1. Check model files are complete (not truncated downloads)
-2. Verify model directory path is correct
-3. Check console/logs for error messages
 
 ## Contributing
 
-This is a research/exploration project. Contributions welcome for:
-- Performance optimizations
-- Additional backend support
-- Model implementations
+Contributions welcome! To get started:
+
+1. Clone all [required repositories](#required-repositories) as described above
+2. Run the [verify setup](#verify-setup) steps
+3. Build with `cargo build --release --features "egui,metal"` (or your GPU backend)
+4. Check existing issues or open a new one to discuss your contribution
+
+Areas where help is appreciated:
+- Performance optimizations (attention, memory)
+- Additional backend testing (CUDA, Vulkan)
+- Training improvements
 - Documentation
 
 ## License
@@ -323,7 +386,9 @@ Apache 2.0
 
 ## Acknowledgments
 
-- [Burn](https://burn.dev) - Deep learning framework for Rust
-- [Candle](https://github.com/huggingface/candle) - Minimalist ML framework
+- [Z-Image / S3-DiT](https://github.com/Tongyi-MAI/Z-Image) by Tongyi-MAI (Alibaba) - The original rectified flow model
+- [Burn](https://burn.dev) by Tracel AI - Deep learning framework for Rust
+- [Candle](https://github.com/huggingface/candle) by Hugging Face - ML framework powering the Metal/CUDA backends
 - [egui](https://github.com/emilk/egui) - Immediate mode GUI for Rust
-- [Qwen](https://github.com/QwenLM/Qwen) - Language model
+- [Qwen3](https://github.com/QwenLM/Qwen3) by Alibaba - Language model family
+- [FLUX](https://github.com/black-forest-labs/flux) by Black Forest Labs - VAE autoencoder architecture

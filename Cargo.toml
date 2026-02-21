@@ -10,8 +10,8 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 z-image = { path = "../z-image-burn/z-image" }
 qwen3-burn = { path = "../qwen3-burn" }
-longcat-burn = { path = "../longcat-burn" }
-umt5-burn = { path = "../umt5-burn" }
+longcat-burn = { path = "../longcat-burn", optional = true }
+umt5-burn = { path = "../umt5-burn", optional = true }
 burn = { path = "../burn/crates/burn", features = ["store"] }
 half = "2.4"
 libc = "0.2"
@@ -34,6 +34,7 @@ rand = { version = "0.9", optional = true }
 default = ["metal"]
 egui = ["dep:eframe", "dep:egui_extras", "dep:rfd", "dep:reqwest", "dep:directories", "dep:chrono", "dep:serde_json", "dep:open", "dep:rand"]
 train = ["burn/autodiff", "burn/train"]
+video = ["dep:longcat-burn", "dep:umt5-burn"]
 
 # Backend features - choose ONE when building
 # macOS (Metal via Candle): cargo build --release --features metal
@@ -41,13 +42,18 @@ train = ["burn/autodiff", "burn/train"]
 # Windows/Linux NVIDIA:     cargo build --release --features cuda
 # Windows/Linux (Vulkan):   cargo build --release --features vulkan
 # CPU only:                 cargo build --release --features cpu
-metal = ["burn/candle", "burn/candle-metal", "burn/ndarray", "longcat-burn/metal", "umt5-burn/metal"]
+metal = ["burn/candle", "burn/candle-metal", "burn/ndarray"]
 wgpu-metal = ["burn/wgpu", "burn/metal"]
-cuda = ["burn/candle", "burn/candle-cuda", "longcat-burn/cuda", "umt5-burn/cuda"]
+cuda = ["burn/candle", "burn/candle-cuda"]
 native-cuda = ["burn/cuda"]
 vulkan = ["burn/wgpu", "burn/vulkan"]
 wgpu = ["burn/wgpu"]
-cpu = ["burn/ndarray", "longcat-burn/cpu", "umt5-burn/cpu"]
+cpu = ["burn/ndarray"]
+
+# Video feature with backend - use e.g. "video,video-metal"
+video-metal = ["video", "longcat-burn/metal", "umt5-burn/metal"]
+video-cuda = ["video", "longcat-burn/cuda", "umt5-burn/cuda"]
+video-cpu = ["video", "longcat-burn/cpu", "umt5-burn/cpu"]
 
 [build-dependencies]
 cbindgen = "0.27"
