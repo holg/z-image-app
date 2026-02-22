@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Z-Image Studio - Low Memory Mode
 //!
 //! This GUI uses process isolation to run on 8GB GPUs:

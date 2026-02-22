@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Z-Image Studio - Cross-platform GUI using egui
 //!
 //! Build for different platforms:
@@ -13,7 +14,6 @@ use std::thread;
 
 use burn::tensor::{Int, Tensor};
 use eframe::egui;
-use half::bf16;
 use qwen3_burn::{Qwen3Config, Qwen3ForCausalLM, Qwen3Model, Qwen3Tokenizer};
 use z_image::modules::ae::{AutoEncoder, AutoEncoderConfig};
 use z_image::modules::transformer::{ZImageModel, ZImageModelConfig};
