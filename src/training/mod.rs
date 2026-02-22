@@ -4,4 +4,5 @@
 
 pub mod dataset;
 pub mod latent_cache;
+pub mod lora_io;
 pub mod train_loop;
