@@ -8,10 +8,10 @@ name = "z_image_ffi"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-z-image = { path = "../z-image-burn/z-image" }
-qwen3-burn = { path = "../qwen3-burn" }
-longcat-burn = { path = "../longcat-burn", optional = true }
-umt5-burn = { path = "../umt5-burn", optional = true }
+z-image = { git = "https://github.com/holg/z-image-burn.git", branch = "develop" }
+qwen3-burn = { git = "https://github.com/holg/qwen3-burn.git" }
+longcat-burn = { git = "https://github.com/holg/longcat-burn.git", optional = true }
+umt5-burn = { git = "https://github.com/holg/umt5-burn.git", optional = true }
 burn = { git = "https://github.com/tracel-ai/burn.git", features = ["store"] }
 half = "2.4"
 libc = "0.2"
