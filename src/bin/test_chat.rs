@@ -6,13 +6,26 @@
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-use burn::backend::candle::{Candle, CandleDevice};
 use burn::module::Module;
 use burn::tensor::{Int, Tensor};
-use half::bf16;
 use qwen3_burn::{Qwen3Config, Qwen3ForCausalLM, Qwen3Tokenizer};
 
-type Backend = Candle<bf16, i64>;
+#[cfg(any(feature = "metal", feature = "cuda"))]
+use burn::backend::candle::{Candle, CandleDevice};
+#[cfg(any(feature = "metal", feature = "cuda"))]
+type Backend = Candle<half::bf16, i64>;
+
+#[cfg(any(feature = "wgpu", feature = "wgpu-metal", feature = "vulkan"))]
+#[cfg(not(any(feature = "metal", feature = "cuda")))]
+use burn::backend::wgpu::{Wgpu, WgpuDevice};
+#[cfg(any(feature = "wgpu", feature = "wgpu-metal", feature = "vulkan"))]
+#[cfg(not(any(feature = "metal", feature = "cuda")))]
+type Backend = Wgpu<f32, i32>;
+
+#[cfg(not(any(feature = "metal", feature = "cuda", feature = "wgpu", feature = "wgpu-metal", feature = "vulkan")))]
+use burn::backend::ndarray::{NdArray, NdArrayDevice};
+#[cfg(not(any(feature = "metal", feature = "cuda", feature = "wgpu", feature = "wgpu-metal", feature = "vulkan")))]
+type Backend = NdArray<f32>;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -43,8 +56,17 @@ fn main() {
     eprintln!("=== Qwen3-0.6B Chat Test ===");
     eprintln!("Model dir: {:?}", model_dir);
 
+    #[cfg(feature = "metal")]
     let device = CandleDevice::metal(0);
-    eprintln!("Using Metal device");
+    #[cfg(feature = "cuda")]
+    #[cfg(not(feature = "metal"))]
+    let device = CandleDevice::cuda(0);
+    #[cfg(any(feature = "wgpu", feature = "wgpu-metal", feature = "vulkan"))]
+    #[cfg(not(any(feature = "metal", feature = "cuda")))]
+    let device = WgpuDevice::default();
+    #[cfg(not(any(feature = "metal", feature = "cuda", feature = "wgpu", feature = "wgpu-metal", feature = "vulkan")))]
+    let device = NdArrayDevice::Cpu;
+    eprintln!("Using GPU device");
 
     // Load tokenizer
     let tokenizer_path = model_dir.join("tokenizer.json");

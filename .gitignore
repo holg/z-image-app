@@ -2,6 +2,10 @@
 /target/
 /build/
 
+# Lock file - not committed because this project builds cross-platform (macOS + Windows)
+# Each platform generates its own Cargo.lock with platform-appropriate dependencies
+Cargo.lock
+
 # Temporary files
 /tmp/
 

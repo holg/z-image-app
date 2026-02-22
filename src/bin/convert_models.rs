@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Convert safetensors models to Burn's .bpk format
 //!
 //! Usage:
@@ -7,12 +8,25 @@
 
 use std::path::PathBuf;
 
-use burn::backend::candle::{Candle, CandleDevice};
 use burn::module::Module;
 use burn::store::{BurnpackWriter, Collector};
-use half::bf16;
 
-type Backend = Candle<bf16, i64>;
+#[cfg(any(feature = "metal", feature = "cuda"))]
+use burn::backend::candle::{Candle, CandleDevice};
+#[cfg(any(feature = "metal", feature = "cuda"))]
+type Backend = Candle<half::bf16, i64>;
+
+#[cfg(any(feature = "wgpu", feature = "wgpu-metal", feature = "vulkan"))]
+#[cfg(not(any(feature = "metal", feature = "cuda")))]
+use burn::backend::wgpu::{Wgpu, WgpuDevice};
+#[cfg(any(feature = "wgpu", feature = "wgpu-metal", feature = "vulkan"))]
+#[cfg(not(any(feature = "metal", feature = "cuda")))]
+type Backend = Wgpu<f32, i32>;
+
+#[cfg(not(any(feature = "metal", feature = "cuda", feature = "wgpu", feature = "wgpu-metal", feature = "vulkan")))]
+use burn::backend::ndarray::{NdArray, NdArrayDevice};
+#[cfg(not(any(feature = "metal", feature = "cuda", feature = "wgpu", feature = "wgpu-metal", feature = "vulkan")))]
+type Backend = NdArray<f32>;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -26,7 +40,16 @@ fn main() {
         std::process::exit(1);
     }
 
+    #[cfg(feature = "metal")]
     let device = CandleDevice::metal(0);
+    #[cfg(feature = "cuda")]
+    #[cfg(not(feature = "metal"))]
+    let device = CandleDevice::cuda(0);
+    #[cfg(any(feature = "wgpu", feature = "wgpu-metal", feature = "vulkan"))]
+    #[cfg(not(any(feature = "metal", feature = "cuda")))]
+    let device = WgpuDevice::default();
+    #[cfg(not(any(feature = "metal", feature = "cuda", feature = "wgpu", feature = "wgpu-metal", feature = "vulkan")))]
+    let device = NdArrayDevice::Cpu;
 
     let mut i = 1;
     while i < args.len() {
@@ -69,7 +92,7 @@ fn find_output_dir(args: &[String]) -> PathBuf {
     PathBuf::from(".")
 }
 
-fn convert_autoencoder(input: &PathBuf, output_dir: &PathBuf, device: &CandleDevice) {
+fn convert_autoencoder(input: &PathBuf, output_dir: &PathBuf, device: &<Backend as burn::prelude::Backend>::Device) {
     use z_image::modules::ae::AutoEncoderConfig;
 
     eprintln!("=== Converting Autoencoder ===");
@@ -108,7 +131,7 @@ fn convert_autoencoder(input: &PathBuf, output_dir: &PathBuf, device: &CandleDev
     }
 }
 
-fn convert_text_encoder(input: &PathBuf, output_dir: &PathBuf, device: &CandleDevice) {
+fn convert_text_encoder(input: &PathBuf, output_dir: &PathBuf, device: &<Backend as burn::prelude::Backend>::Device) {
     use qwen3_burn::{Qwen3Config, Qwen3Model};
 
     eprintln!("=== Converting Qwen3-4B Text Encoder (Z-Image variant) ===");
@@ -148,7 +171,7 @@ fn convert_text_encoder(input: &PathBuf, output_dir: &PathBuf, device: &CandleDe
     }
 }
 
-fn convert_all(model_dir: &PathBuf, output_dir: &PathBuf, device: &CandleDevice) {
+fn convert_all(model_dir: &PathBuf, output_dir: &PathBuf, device: &<Backend as burn::prelude::Backend>::Device) {
     eprintln!("=== Converting All Models ===");
     eprintln!("Source directory: {:?}", model_dir);
     eprintln!("Output directory: {:?}", output_dir);

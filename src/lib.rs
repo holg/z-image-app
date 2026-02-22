@@ -2,27 +2,77 @@
 //!
 //! Provides C-compatible interface for image generation and text chat.
 
+#![recursion_limit = "256"]
+
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use burn::backend::candle::{Candle, CandleDevice};
-#[cfg(feature = "video")]
-use burn::backend::ndarray::{NdArray, NdArrayDevice};
-use half::bf16;
 use qwen3_burn::{Qwen3Config, Qwen3ForCausalLM, Qwen3Model, Qwen3Tokenizer};
 use z_image::modules::ae::AutoEncoder;
 use z_image::modules::transformer::ZImageModel;
 use z_image::GenerateFromTextOpts;
 
-type Backend = Candle<bf16, i64>;
+// Backend selection based on compile-time features
+#[cfg(feature = "metal")]
+mod backend {
+    use burn::backend::candle::{Candle, CandleDevice};
+    use half::bf16;
+    pub type Backend = Candle<bf16, i64>;
+    pub type Device = CandleDevice;
+    pub fn create_device() -> Device { CandleDevice::metal(0) }
+    pub const BACKEND_NAME: &str = "Metal (Candle)";
+}
+
+#[cfg(feature = "cuda")]
+#[cfg(not(feature = "metal"))]
+mod backend {
+    use burn::backend::candle::{Candle, CandleDevice};
+    use half::bf16;
+    pub type Backend = Candle<bf16, i64>;
+    pub type Device = CandleDevice;
+    pub fn create_device() -> Device { CandleDevice::cuda(0) }
+    pub const BACKEND_NAME: &str = "CUDA (Candle)";
+}
+
+#[cfg(any(feature = "wgpu", feature = "wgpu-metal", feature = "vulkan"))]
+#[cfg(not(any(feature = "metal", feature = "cuda")))]
+mod backend {
+    use burn::backend::wgpu::{Wgpu, WgpuDevice};
+    pub type Backend = Wgpu<f32, i32>;
+    pub type Device = WgpuDevice;
+    pub fn create_device() -> Device { WgpuDevice::default() }
+    pub const BACKEND_NAME: &str = "WGPU";
+}
+
+#[cfg(feature = "cpu")]
+#[cfg(not(any(feature = "metal", feature = "cuda", feature = "wgpu", feature = "wgpu-metal", feature = "vulkan")))]
+mod backend {
+    use burn::backend::ndarray::{NdArray, NdArrayDevice};
+    pub type Backend = NdArray<f32>;
+    pub type Device = NdArrayDevice;
+    pub fn create_device() -> Device { NdArrayDevice::Cpu }
+    pub const BACKEND_NAME: &str = "CPU (NdArray)";
+}
+
+#[cfg(not(any(feature = "metal", feature = "cuda", feature = "wgpu", feature = "wgpu-metal", feature = "vulkan", feature = "cpu")))]
+mod backend {
+    use burn::backend::ndarray::{NdArray, NdArrayDevice};
+    pub type Backend = NdArray<f32>;
+    pub type Device = NdArrayDevice;
+    pub fn create_device() -> Device { NdArrayDevice::Cpu }
+    pub const BACKEND_NAME: &str = "CPU (fallback)";
+}
+
+type Backend = backend::Backend;
+
 #[cfg(feature = "video")]
-type CpuBackend = NdArray<f32>;
+type CpuBackend = burn::backend::ndarray::NdArray<f32>;
 
 // Global device
-static DEVICE: OnceLock<CandleDevice> = OnceLock::new();
+static DEVICE: OnceLock<backend::Device> = OnceLock::new();
 
 // Cached image models
 struct ImageModels {
@@ -38,14 +88,14 @@ static IMAGE_MODELS: OnceLock<Mutex<Option<ImageModels>>> = OnceLock::new();
 static TEXT_MODEL: OnceLock<Mutex<Option<Qwen3ForCausalLM<Backend>>>> = OnceLock::new();
 static TEXT_TOKENIZER: OnceLock<Mutex<Option<Qwen3Tokenizer>>> = OnceLock::new();
 
-/// Initialize the Metal device. Call once at app startup.
+/// Initialize the compute device. Call once at app startup.
 #[unsafe(no_mangle)]
 pub extern "C" fn z_image_init() -> i32 {
-    eprintln!("[z-image] Initializing Metal device...");
-    let device = CandleDevice::metal(0);
+    eprintln!("[z-image] Initializing {} device...", backend::BACKEND_NAME);
+    let device = backend::create_device();
     match DEVICE.set(device) {
         Ok(_) => {
-            eprintln!("[z-image] Metal device initialized");
+            eprintln!("[z-image] {} device initialized", backend::BACKEND_NAME);
             0
         }
         Err(_) => {
@@ -89,7 +139,7 @@ pub extern "C" fn z_image_load_models(model_dir: *const c_char) -> i32 {
     }
 }
 
-fn load_image_models_internal(model_dir: &PathBuf, device: &CandleDevice) -> Result<(), String> {
+fn load_image_models_internal(model_dir: &PathBuf, device: &backend::Device) -> Result<(), String> {
     let total_start = Instant::now();
     eprintln!("[z-image] Loading models from {:?}...", model_dir);
 
@@ -304,7 +354,7 @@ fn generate_image_internal(
     model_dir: &PathBuf,
     width: usize,
     height: usize,
-    device: &CandleDevice,
+    device: &backend::Device,
 ) -> Result<(), String> {
     let total_start = Instant::now();
 
@@ -571,7 +621,7 @@ pub extern "C" fn qwen3_init(model_dir: *const c_char) -> i32 {
     }
 }
 
-fn init_text_model_internal(model_dir: &PathBuf, device: &CandleDevice) -> Result<(), String> {
+fn init_text_model_internal(model_dir: &PathBuf, device: &backend::Device) -> Result<(), String> {
     eprintln!("[qwen3] Loading Qwen3-0.6B from {:?}...", model_dir);
 
     // Load tokenizer
